@@ -46,6 +46,68 @@ STOP_FILE = "/podinfo/stop"
 HIDDEN = {"help", "password", "api_key", "out", "jsonl", "status_interval", "stop_file"}
 GROUP_TITLES = {"options": "other"}
 
+# Pre-canned tests. Fields not listed reset to the CLI defaults (server and username are kept).
+# Notes are for the gmktec nodes: Ryzen 7 7730U, Radeon Vega 8 (VCN 2: H.264/HEVC/VP9 decode,
+# H.264/HEVC encode, no AV1 at all, and no GPU decodes 10-bit H.264), and for the encoding
+# settings of dean-tofu modules/jellyfin (tone mapping off, AV1 encoding off).
+LAN = 200_000_000  # bitrate cap high enough that remux/direct are never refused for bitrate
+PRESETS = [
+    {"group": "GPU transcode", "name": "Baseline 1080p", "values": {
+        "ramp": True, "filter": "1080p,h264,sdr"},
+     "note": "1080p H.264 to 1080p H.264, all on the GPU. The cheapest real transcode: the ceiling."},
+    {"group": "GPU transcode", "name": "Remote 720p 4 Mbps", "values": {
+        "ramp": True, "filter": "1080p,sdr", "max_height": 720, "bitrate": 4_000_000},
+     "note": "What a remote viewer on a capped connection costs."},
+    {"group": "GPU transcode", "name": "HEVC output", "values": {
+        "ramp": True, "filter": "1080p,sdr", "codec": "hevc"},
+     "note": "Same sources as the baseline, HEVC encoder instead of H.264."},
+    {"group": "GPU transcode", "name": "4K HDR to 1080p", "values": {
+        "ramp": True, "filter": "4k,hdr"},
+     "note": "4K 10-bit HEVC decode and downscale to 1080p H.264 on the iGPU. Tone mapping is off in "
+             "Jellyfin, so this measures decode and scaling only."},
+    {"group": "GPU transcode", "name": "Dolby Vision", "values": {
+        "ramp": True, "filter": "dovi"},
+     "note": "Dolby Vision sources (some profile 7 with an enhancement layer) transcoded to 1080p H.264."},
+    {"group": "GPU transcode", "name": "4K HDR, one file", "values": {
+        "ramp": True, "filter": "4k,hdr", "same_item": True},
+     "note": "Every stream plays the same 4K HDR file from a different spot: a repeatable number."},
+    {"group": "CPU fallback", "name": "AV1 source", "values": {
+        "ramp": True, "filter": "av1", "max_streams": 10},
+     "note": "Vega 8 has no AV1 decoder, so every stream decodes AV1 in software (dav1d) on the CPU."},
+    {"group": "CPU fallback", "name": "10-bit H.264 anime", "values": {
+        "ramp": True, "filter": "hi10p", "max_streams": 10},
+     "note": "No GPU decodes 10-bit H.264 (Hi10P): software decode on the CPU."},
+    {"group": "Subtitle burn-in", "name": "ASS (anime)", "values": {
+        "ramp": True, "filter": "ass", "burn_subs": True, "max_startup": 90},
+     "note": "Styled ASS rendered by libass on the CPU. First play of a file extracts every subtitle "
+             "track and font first, hence the 90 s startup limit."},
+    {"group": "Subtitle burn-in", "name": "PGS on 4K HDR", "values": {
+        "ramp": True, "filter": "4k,hdr,pgs", "burn_subs": True, "max_startup": 60},
+     "note": "The worst common case: 4K HDR decode and downscale plus a Blu-ray image subtitle overlay."},
+    {"group": "Subtitle burn-in", "name": "DVD subs", "values": {
+        "ramp": True, "filter": "dvdsub", "burn_subs": True, "max_startup": 60},
+     "note": "DVD bitmap subtitles overlaid on the video."},
+    {"group": "Subtitle burn-in", "name": "SRT 1080p", "values": {
+        "ramp": True, "filter": "1080p,srt", "burn_subs": True},
+     "note": "Plain text subtitles: the cheapest burn-in, compare with the baseline."},
+    {"group": "Throughput", "name": "High-bitrate remux", "values": {
+        "ramp": True, "mix": "remux", "filter": "highbitrate", "bitrate": LAN},
+     "note": "Files over 40 Mbps remuxed to HLS: disk, NFS and network, almost no GPU."},
+    {"group": "Throughput", "name": "4K direct play", "values": {
+        "ramp": True, "mix": "direct", "filter": "4k", "bitrate": LAN},
+     "note": "4K files streamed as-is at real-time pace: storage and network only."},
+    {"group": "Realistic", "name": "Random library", "values": {
+        "ramp": True, "mix": "transcode"},
+     "note": "Transcode ramp over random files: what an average stream costs."},
+    {"group": "Realistic", "name": "Household mix (8)", "values": {
+        "streams": 8, "mix": "transcode=2,remux=2,direct=4", "duration": 900, "bitrate": 60_000_000},
+     "note": "8 viewers for 15 minutes: 2 transcodes, 2 remuxes, 4 direct plays."},
+    {"group": "Realistic", "name": "Heavy mix ramp", "values": {
+        "ramp": True, "mix": "transcode=3,remux=1", "filter": "4k", "burn_subs": True,
+        "max_startup": 60, "bitrate": 20_000_000},
+     "note": "4K sources, 3 of 4 transcoded with subtitles burned in, 1 remuxed."},
+]
+
 
 def env_json(name: str, default):
     raw = os.environ.get(name)
@@ -485,6 +547,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and rest == ["options"]:
                 return self._send(200, {
                     "groups": option_spec(self.cfg.defaults), "server_presets": self.cfg.presets,
+                    "presets": PRESETS,
                     "pod": {"node_selector": self.cfg.node_selector, "tolerations": self.cfg.tolerations,
                             "max_run_seconds": self.cfg.max_run},
                     "namespace": self.cfg.namespace, "ttl_seconds": self.cfg.ttl})
