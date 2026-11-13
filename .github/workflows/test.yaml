@@ -20,7 +20,9 @@ jobs:
       - run: python -m unittest discover -s tests -v
       - name: Page script syntax
         run: |
-          python -c "import re; s=open('webui/index.html').read(); open('/tmp/ui.js','w').write(re.search(r'<script>(.*)</script>', s, re.S).group(1))"
-          node --check /tmp/ui.js
+          for page in index compat; do
+            python -c "import re,sys; s=open(f'webui/{sys.argv[1]}.html').read(); open('/tmp/ui.js','w').write(re.search(r'<script>(.*)</script>', s, re.S).group(1))" $page
+            node --check /tmp/ui.js
+          done
       - name: Docker build
         run: docker build -t jfstress-ui .

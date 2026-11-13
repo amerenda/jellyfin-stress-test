@@ -47,6 +47,29 @@ https://jellyfin-stress.amer.dev (LAN only, no login) by the dean-tofu root `k3s
 The image (`Dockerfile`) holds both the UI and the runner. It is built from a commit of this repo by
 `dean-amer-dev/k3s-images` (`images/jellyfin-stress-test/source-ref`) and pushed to Artifact Registry.
 
+## Library compatibility report
+
+`jfcompat.py` asks Jellyfin, for every video and every device in `compat_profiles.py`, what it
+would do: **direct play**, **remux** (video copied; only the container or audio changes) or
+**transcode** (video re-encoded), with Jellyfin's own reasons. It sends each device's profile to
+`POST /Items/{id}/PlaybackInfo`, so Jellyfin's StreamBuilder makes the call exactly as it would for that
+client. Nothing is played. Each file is checked with subtitles off and, if it has any, with its
+default (or first English) subtitle track on, which is when PGS and ASS force a burn-in.
+
+Devices: NVIDIA Shield TV Pro (Jellyfin for Android TV), Fire TV Stick 4K Max 2nd gen (Jellyfin for
+Android TV), Apple TV 4K 2022 (Swiftfin, native and MPV players), Roku Ultra 2024 and Roku Express 4K+
+(Jellyfin for Roku), and an Android phone (Streamyfin, MPV). Each profile is a port of the app's
+own profile code, with the hardware probe answers and audio setup filled in. The assumptions are
+listed in the file and on the report page; change them, or add a device, in `compat_profiles.py`.
+
+In the k3s web UI, *Library compatibility* starts the report as a Job (about 15 minutes for 6,000
+files at concurrency 8). The report page shows each device's share of direct play, remux and transcode
+(with subtitles off or on), why files transcode, and a filterable file list with a CSV download.
+
+```sh
+JF_PASSWORD=... ./jfcompat.py --server https://jellyfin-public-test.amer.dev --username alex --out compat.json
+```
+
 ## Web UI (Locust) + Grafana
 
 `locustfile.py` runs the same player model under [Locust](https://locust.io), which gives you a web

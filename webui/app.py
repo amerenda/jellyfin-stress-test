@@ -35,6 +35,7 @@ import httpx
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
+import jfcompat  # noqa: E402
 import jfstress  # noqa: E402
 
 GROUP = "jfstress.amer.dev"
@@ -230,14 +231,16 @@ def parse_pod(pod: dict, cfg: Config) -> dict:
     return {"node_selector": ns, "tolerations": tol, "max_run_seconds": max_run}
 
 
-def job_manifest(name: str, argv: list[str], pod: dict, form: dict, cfg: Config) -> dict:
+def job_manifest(name: str, argv: list[str], pod: dict, form: dict, cfg: Config,
+                 script: str = "/app/jfstress.py", kind: str = "stress") -> dict:
     labels = dict(RUN_LABELS)
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
             "name": name, "namespace": cfg.namespace, "labels": labels,
-            "annotations": {f"{GROUP}/form": json.dumps(form, sort_keys=True),
+            "annotations": {f"{GROUP}/kind": kind,
+                            f"{GROUP}/form": json.dumps(form, sort_keys=True),
                             f"{GROUP}/argv": json.dumps(argv),
                             f"{GROUP}/pod": json.dumps(pod, sort_keys=True)},
         },
@@ -259,7 +262,7 @@ def job_manifest(name: str, argv: list[str], pod: dict, form: dict, cfg: Config)
                     "containers": [{
                         "name": "jfstress",
                         "image": cfg.image,
-                        "command": ["python", "-u", "/app/jfstress.py"],
+                        "command": ["python", "-u", script],
                         "args": argv + ["--jsonl", f"--stop-file={STOP_FILE}"],
                         "env": [{"name": "JF_PASSWORD", "valueFrom": {"secretKeyRef": {
                             "name": cfg.secret_name, "key": cfg.secret_key}}}],
@@ -277,8 +280,41 @@ def job_manifest(name: str, argv: list[str], pod: dict, form: dict, cfg: Config)
     }
 
 
-def command_line(argv: list[str]) -> str:
-    return "JF_PASSWORD=... ./jfstress.py " + " ".join(shlex.quote(a) for a in argv)
+def command_line(argv: list[str], script: str = "jfstress.py") -> str:
+    return f"JF_PASSWORD=... ./{script} " + " ".join(shlex.quote(a) for a in argv)
+
+
+def compat_argv(body: dict, defaults: dict) -> tuple[list[str], dict]:
+    """argv for jfcompat.py from the report form, checked by its own parser."""
+    form = {"server": (body.get("server") or defaults.get("server") or "").strip(),
+            "username": (body.get("username") or defaults.get("username") or "").strip(),
+            "subtitles": body.get("subtitles", True) not in (False, "false", "off"),
+            "concurrency": str(body.get("concurrency") or "8").strip(),
+            "library": (body.get("library") or "").strip(),
+            "types": (body.get("types") or "Movie,Episode").strip(),
+            "devices": [d for d in body.get("devices") or [] if d],
+            "limit": str(body.get("limit") or "").strip()}
+    if not form["server"] or not form["username"]:
+        raise ValueError("server and username are required")
+    argv = [f"--server={form['server']}", f"--username={form['username']}", f"--types={form['types']}",
+            f"--concurrency={form['concurrency']}"]
+    if not form["subtitles"]:
+        argv.append("--no-subtitles")
+    if form["library"]:
+        argv.append(f"--library={form['library']}")
+    if form["limit"]:
+        argv.append(f"--limit={form['limit']}")
+    argv += [f"--device={d}" for d in form["devices"]]
+    p = jfcompat.build_parser()
+
+    def fail(msg):
+        raise ValueError(msg)
+
+    p.error = fail
+    a = p.parse_args(argv)
+    if not 1 <= a.concurrency <= 32:
+        raise ValueError("concurrency must be 1-32")
+    return argv, form
 
 
 # ---------- Kubernetes ----------
@@ -403,6 +439,13 @@ class Runs:
 
     @staticmethod
     def result_summary(rep: dict) -> dict:
+        if rep.get("type") == "compat":
+            out = {"kind": "compat", "files": len(rep.get("items") or []), "transcode_pct": {}}
+            for d in rep.get("devices") or []:
+                c = rep["summary"][d["id"]]["no_subs"]
+                n = sum(c.values()) or 1
+                out["transcode_pct"][d["id"]] = round(100 * c["transcode"] / n)
+            return out
         return {k: rep.get(k) for k in ("ramp_result_streams", "ramp_reason", "streams_total", "errors",
                                         "stalls_total", "stall_seconds_total", "startup_p50_s",
                                         "startup_max_s", "stopped_by_user", "duration_s")}
@@ -422,13 +465,14 @@ class Runs:
                 except KubeError:
                     pass
         return {
-            "name": job["metadata"]["name"],
+            "name": job["metadata"]["name"], "kind": ann.get(f"{GROUP}/kind", "stress"),
             "created": job["metadata"]["creationTimestamp"],
             "finished": job.get("status", {}).get("completionTime"),
             "state": state, "reason": why,
             "node": (pod or {}).get("spec", {}).get("nodeName"),
             "server": form.get("server"),
-            "mode": "ramp" if form.get("ramp") in (True, "true", "on") else "fixed",
+            "mode": "compat" if ann.get(f"{GROUP}/kind") == "compat"
+            else "ramp" if form.get("ramp") in (True, "true", "on") else "fixed",
             "mix": form.get("mix"), "streams": form.get("streams"), "filter": form.get("filter"),
             "result": result,
         }
@@ -448,8 +492,12 @@ class Runs:
         ann = job["metadata"].get("annotations") or {}
         out["form"] = json.loads(ann.get(f"{GROUP}/form", "{}"))
         out["pod"] = json.loads(ann.get(f"{GROUP}/pod", "{}"))
-        out["command"] = command_line(json.loads(ann.get(f"{GROUP}/argv", "[]")))
+        out["command"] = command_line(json.loads(ann.get(f"{GROUP}/argv", "[]")),
+                                      "jfcompat.py" if out["kind"] == "compat" else "jfstress.py")
         out["live"] = self.parse_lines(self._log_lines(pod, tailLines=400)) if pod else None
+        if out["kind"] == "compat" and out["live"] and out["live"].get("report"):
+            out["live"]["report"] = None  # large; the report page fetches it
+            out["has_report"] = True
         if out["state"] in ("pending", "starting") and pod:
             evs = self.kube.req("GET", self.events, params={
                 "fieldSelector": f"involvedObject.name={pod['metadata']['name']}"}).json()["items"]
@@ -463,12 +511,29 @@ class Runs:
         validate_argv(argv)
         pod = parse_pod(body.get("pod") or {}, self.cfg)
         if not body.get("allow_concurrent"):
-            busy = [r["name"] for r in self.list() if r["state"] in ("starting", "pending", "running", "stopping")]
-            if busy:
-                raise KubeError(409, f"run {busy[0]} is still active; stop it first or allow concurrent runs")
-        name = f"jfstress-{dt.datetime.now(dt.timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
+            self._refuse_if_busy()
+        name = self._new_name("jfstress")
         self.kube.req("POST", self.jobs, json=job_manifest(name, argv, pod, form, self.cfg))
         return {"name": name, "command": command_line(argv)}
+
+    def create_compat(self, body: dict) -> dict:
+        argv, form = compat_argv(body, self.cfg.defaults)
+        pod = parse_pod(body.get("pod") or {}, self.cfg)
+        if not body.get("allow_concurrent"):
+            self._refuse_if_busy()
+        name = self._new_name("jfcompat")
+        self.kube.req("POST", self.jobs, json=job_manifest(name, argv, pod, form, self.cfg,
+                                                            script="/app/jfcompat.py", kind="compat"))
+        return {"name": name, "command": command_line(argv, "jfcompat.py")}
+
+    def _refuse_if_busy(self) -> None:
+        busy = [r["name"] for r in self.list() if r["state"] in ("starting", "pending", "running", "stopping")]
+        if busy:
+            raise KubeError(409, f"run {busy[0]} is still active; stop it first or allow concurrent runs")
+
+    @staticmethod
+    def _new_name(prefix: str) -> str:
+        return f"{prefix}-{dt.datetime.now(dt.timezone.utc):%Y%m%d-%H%M%S}-{secrets.token_hex(2)}"
 
     def stop(self, name: str) -> None:
         self._own(name)
@@ -539,6 +604,9 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and not parts:
                 with open(os.path.join(HERE, "index.html"), "rb") as f:
                     return self._send(200, f.read(), "text/html; charset=utf-8")
+            if method == "GET" and len(parts) == 2 and parts[0] == "compat" and set(parts[1]) <= NAME_OK:
+                with open(os.path.join(HERE, "compat.html"), "rb") as f:
+                    return self._send(200, f.read(), "text/html; charset=utf-8")
             if parts == ["healthz"]:
                 return self._send(200, "ok", "text/plain")
             if parts[:1] != ["api"]:
@@ -548,6 +616,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(200, {
                     "groups": option_spec(self.cfg.defaults), "server_presets": self.cfg.presets,
                     "presets": PRESETS,
+                    "devices": [{"id": d.id, "name": d.name, "app": d.app} for d in jfcompat.DEVICES],
                     "pod": {"node_selector": self.cfg.node_selector, "tolerations": self.cfg.tolerations,
                             "max_run_seconds": self.cfg.max_run},
                     "namespace": self.cfg.namespace, "ttl_seconds": self.cfg.ttl})
@@ -560,6 +629,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError as e:
                     err = str(e)
                 return self._send(200, {"command": command_line(argv), "error": err})
+            if method == "POST" and rest == ["compat"]:
+                return self._send(201, self.runs.create_compat(self._body()))
             if rest == ["runs"]:
                 if method == "GET":
                     return self._send(200, {"runs": self.runs.list()})
