@@ -73,6 +73,7 @@ tr.run:hover, tr.run.sel { background: var(--row); }
 .events { max-height: 260px; overflow-y: auto; }
 .muted { color: var(--muted); }
 #detail:empty { display: none; }
+#c_devices label { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; padding: 2px 0; }
 .help { overflow-wrap: anywhere; }
 @media (max-width: 480px) { .field { grid-template-columns: 104px minmax(0, 1fr); } header { padding: 12px 16px; } }
 </style>
@@ -83,6 +84,23 @@ tr.run:hover, tr.run.sel { background: var(--row); }
   <span id="ns"></span>
 </header>
 <main>
+  <div style="display:grid; gap:16px; align-content:start; min-width:0">
+  <section class="panel">
+    <h2>Library compatibility</h2>
+    <p class="muted" style="margin-top:0">Asks Jellyfin, for every file, what it would do on each device:
+      direct play, remux (video copied) or transcode, and why. Nothing is played.</p>
+    <div class="field"><label for="c_devices">devices</label><div id="c_devices"></div></div>
+    <div class="field"><label for="c_library">library</label><input type="text" id="c_library" placeholder="all">
+      <div class="help">Uses the server and user from the run form below.</div></div>
+    <div class="field"><label for="c_subs">subtitles</label><input type="checkbox" id="c_subs" checked>
+      <div class="help">Also check each file with its default subtitle track on (burn-ins). About twice the time.</div></div>
+    <div class="field"><label for="c_conc">concurrency</label><input type="number" id="c_conc" value="8">
+      <div class="help">PlaybackInfo requests in flight. 8 does the whole library in about 15 minutes.</div></div>
+    <div class="field"><label for="c_limit">limit</label><input type="number" id="c_limit" placeholder="all files">
+      <div class="help">Only the first N files, for a quick look.</div></div>
+    <div class="row"><button class="primary" id="c_start">Run report</button></div>
+    <div class="msg" id="c_msg"></div>
+  </section>
   <section class="panel">
     <h2>New run</h2>
     <div class="presets" id="presets" style="margin-bottom:12px"></div>
@@ -94,6 +112,7 @@ tr.run:hover, tr.run.sel { background: var(--row); }
     </div>
     <div class="msg" id="formmsg"></div>
   </section>
+  </div>
   <div style="display:grid; gap:16px; align-content:start; min-width:0">
     <section class="panel">
       <h2>Runs</h2>
@@ -161,6 +180,8 @@ function renderForm() {
     $("#presetnote").textContent = p.note;
     applyPreset(p.values);
   });
+  $("#c_devices").innerHTML = OPTS.devices.map(d => `<label class="row" style="gap:6px">
+      <input type="checkbox" value="${esc(d.id)}" checked style="margin:0"> ${esc(d.name)} <span class="muted">${esc(d.app)}</span></label>`).join("");
   $("#form").addEventListener("input", schedulePreview);
   $("#form").addEventListener("change", schedulePreview);
 }
@@ -213,9 +234,30 @@ $("#start").onclick = async () => {
   finally { $("#start").disabled = false; }
 };
 
+$("#c_start").onclick = async () => {
+  const msg = $("#c_msg");
+  msg.className = "msg"; msg.textContent = "starting…";
+  $("#c_start").disabled = true;
+  try {
+    const devs = [...document.querySelectorAll("#c_devices input:checked")].map(i => i.value);
+    const all = devs.length === OPTS.devices.length;
+    const r = await api("POST", "/api/compat", {
+      server: $("#f_server").value.trim(), username: $("#f_username").value.trim(),
+      library: $("#c_library").value.trim(), subtitles: $("#c_subs").checked,
+      concurrency: $("#c_conc").value, limit: $("#c_limit").value, devices: all ? [] : devs,
+      pod: {node_selector: $("#p_ns").value, tolerations: $("#p_tol").value, max_run_seconds: $("#p_max").value},
+      allow_concurrent: $("#concurrent").checked});
+    msg.textContent = "started " + r.name;
+    await loadRuns();
+    select(r.name);
+  } catch (e) { msg.className = "msg err"; msg.textContent = e.message; }
+  finally { $("#c_start").disabled = false; }
+};
+
 const badge = s => `<span class="badge s-${esc(s)}">${esc(s)}</span>`;
 const when = t => t ? new Date(t).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
 function testLabel(r) {
+  if (r.kind === "compat") return "library compatibility";
   const parts = [r.mode, r.mix];
   if (r.mode === "fixed" && r.streams) parts.push(r.streams + " streams");
   if (r.filter) parts.push(r.filter);
@@ -224,6 +266,7 @@ function testLabel(r) {
 function resultLabel(r) {
   const x = r.result;
   if (!x) return "";
+  if (x.kind === "compat") return `<a href="/compat/${esc(r.name)}" onclick="event.stopPropagation()">report</a>`;
   if (x.ramp_result_streams != null) return `<b>${x.ramp_result_streams}</b> streams`;
   return `${x.stalls_total} stalls`;
 }
@@ -294,7 +337,12 @@ async function loadDetail() {
   if (d.pod_events && d.pod_events.length) html += `<pre>${esc(d.pod_events.join("\n"))}</pre>`;
   html += `<dl class="kv"><dt>server</dt><dd>${esc(d.server)}</dd><dt>node</dt><dd>${esc(d.node || "–")}</dd>
     <dt>started</dt><dd>${when(d.created)}</dd>${d.finished ? `<dt>finished</dt><dd>${when(d.finished)}</dd>` : ""}</dl>`;
-  if (rep) html += reportBlock(rep);
+  if (d.kind === "compat") {
+    html += d.has_report || d.result
+      ? `<p><a href="/compat/${esc(d.name)}"><button class="primary">Open report</button></a>
+         <span class="muted">${d.result ? d.result.files + " files" : ""}</span></p>`
+      : `<p class="muted">The report opens here when the run finishes.</p>`;
+  } else if (rep) html += reportBlock(rep);
   else if (d.result) html += reportBlock(d.result);
   if (st) html += `<h2 style="margin-top:14px">Streams <span class="muted" style="font-weight:400">
       t=${Math.round(st.t)} s · active ${st.active}${st.held_ok != null ? ` · held ${st.held_ok}` : ""} · ≈${st.mbit_s} Mbit/s</span></h2>` + streamTable(st);

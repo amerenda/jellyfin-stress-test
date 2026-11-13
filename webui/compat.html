@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Library Compatibility</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6676; --border: #dde1e8;
+  --accent: #3b5bdb; --accent-text: #ffffff; --row: #f9fafc; --code: #eef1f6;
+  --direct: #2b8a3e; --remux: #1971c2; --transcode: #c92a2a; --error: #868e96;
+  --direct-bg: #d3f9d8; --remux-bg: #d0ebff; --transcode-bg: #ffe3e3; --error-bg: #e9ecef;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171d; --panel: #1c2028; --text: #e3e7ee; --muted: #9aa3b2; --border: #2e3440;
+    --accent: #6d8bff; --accent-text: #0d1020; --row: #20252e; --code: #232833;
+    --direct: #69db7c; --remux: #74c0fc; --transcode: #ff8787; --error: #adb5bd;
+    --direct-bg: #1f3a26; --remux-bg: #1b3247; --transcode-bg: #45222a; --error-bg: #2b3038;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+  display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }
+header h1 { font-size: 18px; margin: 0; }
+header a { color: var(--accent); }
+main { padding: 16px 20px; display: grid; gap: 16px; }
+@media (max-width: 600px) { main { padding: 12px 16px; } header { padding: 12px 16px; } }
+section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; min-width: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+.muted { color: var(--muted); }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.scroll { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 13px; }
+th, td { text-align: left; padding: 5px 7px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.dev { cursor: pointer; }
+tr.dev:hover, tr.dev.sel { background: var(--row); }
+.bar { display: flex; height: 14px; border-radius: 3px; overflow: hidden; min-width: 160px; background: var(--error-bg); }
+.bar span { display: block; height: 100%; }
+.b-D { background: var(--direct); } .b-R { background: var(--remux); } .b-T { background: var(--transcode); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.c { display: inline-block; min-width: 22px; text-align: center; border-radius: 4px; font-weight: 700; font-size: 12px; padding: 1px 4px; }
+.c-D { color: var(--direct); background: var(--direct-bg); }
+.c-R { color: var(--remux); background: var(--remux-bg); }
+.c-T { color: var(--transcode); background: var(--transcode-bg); }
+.c-E, .c-- { color: var(--error); background: var(--error-bg); }
+select, input[type=text] { padding: 5px 7px; border: 1px solid var(--border); border-radius: 5px; background: var(--bg); color: var(--text); font: inherit; max-width: 100%; }
+button { padding: 5px 11px; border-radius: 5px; border: 1px solid var(--border); background: var(--panel); color: var(--text); font: inherit; cursor: pointer; }
+button.on { background: var(--accent); color: var(--accent-text); border-color: var(--accent); }
+.seg { display: inline-flex; } .seg button { border-radius: 0; } .seg button:first-child { border-radius: 5px 0 0 5px; }
+.seg button:last-child { border-radius: 0 5px 5px 0; border-left: 0; }
+.devname { font-weight: 600; } .devapp { font-size: 12px; }
+th.dcol { writing-mode: vertical-rl; transform: rotate(180deg); white-space: nowrap; font-size: 12px; padding: 6px 2px; text-align: left; }
+td.dcell { text-align: center; padding: 4px 2px; }
+.title { min-width: 180px; } .small { font-size: 12px; }
+.notes dt { font-weight: 600; margin-top: 8px; } .notes dd { margin: 2px 0 0; }
+.notes ul { margin: 2px 0; padding-left: 18px; }
+#msg.err { color: var(--transcode); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Library compatibility</h1>
+  <span class="muted" id="meta">loading…</span>
+  <a href="/">← runs</a>
+</header>
+<main>
+  <section>
+    <div class="row" style="justify-content:space-between; margin-bottom:10px">
+      <h2 style="margin:0">By device</h2>
+      <div class="row">
+        <span class="muted small">Subtitles</span>
+        <div class="seg"><button id="s_off" class="on">off</button><button id="s_on">default track on</button></div>
+      </div>
+    </div>
+    <div class="legend muted" style="margin-bottom:8px">
+      <span><i class="b-D"></i>direct play: file sent as is</span>
+      <span><i class="b-R"></i>remux: video copied, container/audio changed (cheap)</span>
+      <span><i class="b-T"></i>transcode: video re-encoded (GPU/CPU)</span>
+    </div>
+    <div class="scroll"><table id="devices"></table></div>
+    <p class="muted small" id="msg"></p>
+  </section>
+  <section>
+    <h2 id="reasons_title">Why files transcode</h2>
+    <div class="scroll"><table id="reasons"></table></div>
+  </section>
+  <section>
+    <div class="row" style="justify-content:space-between; margin-bottom:10px">
+      <h2 style="margin:0">Files</h2>
+      <button id="csv">Download CSV</button>
+    </div>
+    <div class="row" style="margin-bottom:10px">
+      <input type="text" id="q" placeholder="search title, codec…" style="flex:1 1 200px">
+      <select id="f_dev"></select>
+      <select id="f_out">
+        <option value="">any outcome</option><option value="T">transcode</option>
+        <option value="R">remux</option><option value="D">direct play</option><option value="E">error</option>
+      </select>
+      <select id="f_reason"><option value="">any reason</option></select>
+    </div>
+    <div class="muted small" id="count"></div>
+    <div class="scroll"><table id="files"></table></div>
+    <div class="row" style="margin-top:10px"><button id="prev">‹ prev</button><span id="page" class="muted small"></span><button id="next">next ›</button></div>
+  </section>
+  <section>
+    <h2>Device assumptions</h2>
+    <p class="muted small" style="margin-top:0">Each column is the profile the app would send on that device, built from the
+      app's own profile code with the hardware answers filled in (compat_profiles.py). Jellyfin's StreamBuilder makes the
+      decision, the same as for a real client.</p>
+    <dl class="notes" id="notes"></dl>
+  </section>
+</main>
+<script>
+"use strict";
+const $ = s => document.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const NAME = location.pathname.split("/").filter(Boolean).pop();
+const WORD = {D: "direct play", R: "remux", T: "transcode", E: "error"};
+const PAGE = 100;
+let R, subsOn = false, selDev = "", page = 0, filtered = [];
+
+function decode(code) {
+  if (!code) return {d: "-", reasons: []};
+  const [d, rs] = code.split(":");
+  return {d, reasons: rs ? rs.split(".").map(i => R.reasons[+i]) : []};
+}
+function code(dev, i) {
+  const s = subsOn ? R.results_subs[dev][i] : null;
+  return decode(s ?? R.results[dev][i]);
+}
+function pct(n, t) { return t ? Math.round(100 * n / t) : 0; }
+
+function renderDevices() {
+  const rows = R.devices.map(d => {
+    const c = R.summary[d.id][subsOn ? "subs_on" : "no_subs"];
+    const t = c.direct + c.remux + c.transcode + c.error + c.pending;
+    const seg = k => `<span class="b-${k}" style="width:${100 * c[{D: "direct", R: "remux", T: "transcode"}[k]] / (t || 1)}%"></span>`;
+    return `<tr class="dev ${selDev === d.id ? "sel" : ""}" data-id="${esc(d.id)}">
+      <td><div class="devname">${esc(d.name)}</div><div class="devapp muted">${esc(d.app)}</div></td>
+      <td style="width:40%"><div class="bar">${seg("D")}${seg("R")}${seg("T")}</div></td>
+      <td class="num" style="color:var(--direct)">${pct(c.direct, t)}%</td>
+      <td class="num" style="color:var(--remux)">${pct(c.remux, t)}%</td>
+      <td class="num" style="color:var(--transcode)"><b>${pct(c.transcode, t)}%</b><div class="muted small">${c.transcode} files</div></td></tr>`;
+  }).join("");
+  $("#devices").innerHTML = `<thead><tr><th>device</th><th></th><th class="num">direct</th><th class="num">remux</th>
+    <th class="num">transcode</th></tr></thead><tbody>${rows}</tbody>`;
+  document.querySelectorAll("tr.dev").forEach(tr => tr.onclick = () => {
+    selDev = selDev === tr.dataset.id ? "" : tr.dataset.id;
+    $("#f_dev").value = selDev; page = 0; renderAll();
+  });
+}
+
+function renderReasons() {
+  const devs = selDev ? R.devices.filter(d => d.id === selDev) : R.devices;
+  const counts = new Map();
+  for (const d of devs) R.items.forEach((_, i) => {
+    const x = code(d.id, i);
+    if (x.d !== "T" && x.d !== "R") return;
+    for (const r of x.reasons) {
+      const k = r + "|" + x.d;
+      const m = counts.get(k) || {r, d: x.d, per: {}};
+      m.per[d.id] = (m.per[d.id] || 0) + 1;
+      counts.set(k, m);
+    }
+  });
+  const list = [...counts.values()].sort((a, b) => (b.d === "T") - (a.d === "T") ||
+    Object.values(b.per).reduce((x, y) => x + y, 0) - Object.values(a.per).reduce((x, y) => x + y, 0));
+  $("#reasons_title").textContent = "Why files transcode or remux" + (selDev ? " on " + R.devices.find(d => d.id === selDev).name : "");
+  $("#reasons").innerHTML = list.length ? `<thead><tr><th>reason</th><th>effect</th>${devs.map(d =>
+      `<th class="num" title="${esc(d.app)}">${esc(devs.length > 1 ? d.name.replace(/\s*\(.*\)/, "") : "files")}</th>`).join("")}</tr></thead>
+    <tbody>${list.map(m => `<tr style="cursor:pointer" data-r="${esc(m.r)}"><td>${esc(m.r)}</td>
+      <td><span class="c c-${m.d}">${m.d}</span></td>
+      ${devs.map(d => `<td class="num">${m.per[d.id] || ""}</td>`).join("")}</tr>`).join("")}</tbody>`
+    : `<tbody><tr><td class="muted">Nothing transcodes or remuxes${selDev ? " on this device" : ""}.</td></tr></tbody>`;
+  document.querySelectorAll("#reasons tr[data-r]").forEach(tr => tr.onclick = () => {
+    $("#f_reason").value = tr.dataset.r; page = 0; renderFiles();
+    $("#files").scrollIntoView({behavior: "smooth", block: "start"});
+  });
+}
+
+function applyFilters() {
+  const q = $("#q").value.trim().toLowerCase(), dev = $("#f_dev").value, out = $("#f_out").value, reason = $("#f_reason").value;
+  const devs = dev ? [dev] : R.devices.map(d => d.id);
+  filtered = [];
+  R.items.forEach((it, i) => {
+    if (q && !`${it.title} ${it.video} ${it.audio} ${it.container} ${it.sub || ""} ${it.series || ""}`.toLowerCase().includes(q)) return;
+    if (out || reason) {
+      const hit = devs.some(d => { const x = code(d, i); return (!out || x.d === out) && (!reason || x.reasons.includes(reason)); });
+      if (!hit) return;
+    }
+    filtered.push(i);
+  });
+}
+
+function renderFiles() {
+  applyFilters();
+  const pages = Math.max(1, Math.ceil(filtered.length / PAGE));
+  page = Math.min(page, pages - 1);
+  const rows = filtered.slice(page * PAGE, page * PAGE + PAGE).map(i => {
+    const it = R.items[i];
+    return `<tr><td class="title">${esc(it.title)}${it.year && it.type === "Movie" ? ` <span class="muted">(${it.year})</span>` : ""}</td>
+      <td class="small">${esc(it.video)}<div class="muted">${esc(it.container)} · ${it.mbps} Mb/s</div></td>
+      <td class="small">${esc(it.audio)}</td><td class="small">${esc(subsOn ? (it.sub || "none") : "off")}</td>
+      ${R.devices.map(d => { const x = code(d.id, i);
+        return `<td class="dcell"><span class="c c-${x.d}" title="${esc(d.name + " / " + d.app + ": " + (WORD[x.d] || "not asked") +
+          (x.reasons.length ? "\n" + x.reasons.join("\n") : ""))}">${x.d}</span></td>`; }).join("")}</tr>`;
+  }).join("");
+  $("#files").innerHTML = `<thead><tr><th>file</th><th>video</th><th>audio</th><th>subtitle</th>
+    ${R.devices.map(d => `<th class="dcol" title="${esc(d.app)}">${esc(d.name.replace(/\s*\(.*\)/, ""))}<br><span class="muted">${esc(d.app.replace("Jellyfin for ", ""))}</span></th>`).join("")}</tr></thead>
+    <tbody>${rows || `<tr><td class="muted" colspan="${4 + R.devices.length}">No files match.</td></tr>`}</tbody>`;
+  $("#count").textContent = `${filtered.length} of ${R.items.length} files. Hover a letter for Jellyfin's reasons.`;
+  $("#page").textContent = `page ${page + 1} of ${pages}`;
+  $("#prev").disabled = page === 0; $("#next").disabled = page >= pages - 1;
+}
+
+function renderAll() { renderDevices(); renderReasons(); renderFiles(); }
+
+function csv() {
+  const head = ["title", "type", "year", "container", "video", "audio", "mbps", "subtitle", ...R.devices.flatMap(d => [d.id, d.id + " reasons"])];
+  const q = v => `"${String(v ?? "").replace(/"/g, '""')}"`;
+  const lines = [head.map(q).join(",")].concat(filtered.map(i => {
+    const it = R.items[i];
+    return [it.title, it.type, it.year, it.container, it.video, it.audio, it.mbps, subsOn ? it.sub : "off",
+      ...R.devices.flatMap(d => { const x = code(d.id, i); return [WORD[x.d] || "", x.reasons.join(" ")]; })].map(q).join(",");
+  }));
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([lines.join("\n")], {type: "text/csv"}));
+  a.download = `${NAME}${subsOn ? "-subs" : ""}.csv`;
+  a.click();
+}
+
+(async () => {
+  const r = await fetch(`/api/runs/${NAME}/report.json`);
+  if (!r.ok) throw new Error((await r.json().catch(() => ({}))).error || r.statusText);
+  R = await r.json();
+  if (R.type !== "compat") throw new Error("this run is not a compatibility report");
+  $("#meta").textContent = `${R.items.length} files · ${R.server} · ${new Date(R.generated).toLocaleString()}`
+    + (R.stopped_early ? " · stopped early, partial" : "");
+  $("#f_dev").innerHTML = `<option value="">any device</option>` + R.devices.map(d =>
+    `<option value="${esc(d.id)}">${esc(d.name + " / " + d.app)}</option>`).join("");
+  $("#f_reason").innerHTML += R.reasons.map(x => `<option>${esc(x)}</option>`).join("");
+  $("#notes").innerHTML = R.devices.map(d => `<dt>${esc(d.name)} · ${esc(d.app)}</dt><dd>${esc(d.hardware)}
+    ${d.assumptions.length ? `<ul>${d.assumptions.map(a => `<li>${esc(a)}</li>`).join("")}</ul>` : ""}</dd>`).join("");
+  const hasSubs = Object.values(R.results_subs).some(l => l.some(Boolean));
+  if (!hasSubs) { $("#s_on").disabled = true; $("#s_on").title = "this report was run without the subtitles pass"; }
+  $("#s_off").onclick = () => { subsOn = false; $("#s_off").classList.add("on"); $("#s_on").classList.remove("on"); renderAll(); };
+  $("#s_on").onclick = () => { subsOn = true; $("#s_on").classList.add("on"); $("#s_off").classList.remove("on"); renderAll(); };
+  for (const id of ["#q", "#f_out", "#f_reason"]) $(id).addEventListener("input", () => { page = 0; renderFiles(); });
+  $("#f_dev").addEventListener("input", () => { selDev = $("#f_dev").value; page = 0; renderAll(); });
+  $("#prev").onclick = () => { page--; renderFiles(); };
+  $("#next").onclick = () => { page++; renderFiles(); };
+  $("#csv").onclick = csv;
+  renderAll();
+})().catch(e => { $("#meta").textContent = ""; $("#msg").className = "err"; $("#msg").textContent = e.message; });
+</script>
+</body>
+</html>
