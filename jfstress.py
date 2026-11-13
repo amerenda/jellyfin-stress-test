@@ -11,12 +11,15 @@ method you pick (direct / remux / transcode), then plays the stream the way a
 player does: it downloads HLS segments (or the static file) at real-time pace,
 keeps a bounded buffer, and records startup time, stalls and fill speed.
 The server's own view (/Sessions TranscodingInfo: fps, hw accel, codecs) is
-polled alongside. For a web UI + Grafana, see locustfile.py.
+polled alongside. For a web UI + Grafana, see locustfile.py. For running in a
+Kubernetes pod, --jsonl swaps the terminal table for JSON lines on stdout
+(event, status, report) and --stop-file ends the run gracefully.
 """
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import os
 import random
@@ -38,6 +41,10 @@ from jfcore import (CLIENT, TICKS, HealthConfig, Player, auth_header, describe_v
                     transcoding_url, video_stream)
 
 console = Console(stderr=True)
+
+
+def emit(obj: dict) -> None:
+    print(json.dumps(obj, separators=(",", ":"), default=str), flush=True)
 
 
 class Jellyfin:
@@ -153,6 +160,8 @@ class Runner:
         self.events: list[str] = []
         self.ramp_result: int | None = None
         self.ramp_reason = ""
+        self.held_ok = 0
+        self.stopped_by_user = False
         self.t0 = time.monotonic()
         limits = httpx.Limits(max_connections=None, max_keepalive_connections=200)
         self.http = httpx.AsyncClient(timeout=httpx.Timeout(args.timeout, connect=10),
@@ -163,7 +172,10 @@ class Runner:
         self.overrides = dict(kv.split("=", 1) for kv in (args.param or []))
 
     def log(self, msg: str) -> None:
-        self.events.append(f"[{time.monotonic() - self.t0:6.0f}s] {msg}")
+        t = time.monotonic() - self.t0
+        self.events.append(f"[{t:6.0f}s] {msg}")
+        if self.args.jsonl:
+            emit({"type": "event", "t": round(t, 1), "msg": msg})
 
     async def client_for(self, s: Stream) -> Jellyfin:
         jf = Jellyfin(self.args.server, self.http, s.device_id, f"{CLIENT}-{s.idx:02d}",
@@ -352,9 +364,12 @@ class Runner:
         self.log(f"{len(self.items)} candidate items")
         poller = asyncio.create_task(self.poll_sessions())
         cycle = parse_mix(a.mix)
+        watcher = asyncio.create_task(self._watch_stop_file()) if a.stop_file else None
         try:
-            with Live(self.render(), console=console, refresh_per_second=2, transient=False) as live:
-                ui = asyncio.create_task(self._ui(live))
+            view = (contextlib.nullcontext() if a.jsonl
+                    else Live(self.render(), console=console, refresh_per_second=2, transient=False))
+            with view as live:
+                ui = asyncio.create_task(self._status_loop() if a.jsonl else self._ui(live))
                 if a.ramp:
                     await self._ramp(cycle)
                 else:
@@ -368,10 +383,15 @@ class Runner:
                 self.stop.set()
                 await asyncio.wait(self.tasks, timeout=30)
                 ui.cancel()
-                live.update(self.render())
+                if a.jsonl:
+                    emit(self.status())
+                else:
+                    live.update(self.render())
         finally:
             self.stop.set()
             poller.cancel()
+            if watcher:
+                watcher.cancel()
             for t in self.tasks:
                 t.cancel()
             await asyncio.gather(*self.tasks, return_exceptions=True)
@@ -381,20 +401,24 @@ class Runner:
 
     async def _ramp(self, cycle: list[str]) -> None:
         a = self.args
-        held_ok = 0
         while not self.stop.is_set():
             n = len(self.active())
             if n >= a.max_streams:
-                self.ramp_result, self.ramp_reason = held_ok, f"hit --max-streams {a.max_streams}"
-                if await self._hold(a.interval):
+                self.ramp_result, self.ramp_reason = self.held_ok, f"hit --max-streams {a.max_streams}"
+                if await self._hold(a.interval) and not self.stop.is_set():
                     self.ramp_result = n
                 return
             self.add_stream(cycle[len(self.streams) % len(cycle)])
             if not await self._hold(a.interval):
-                self.ramp_result = held_ok
+                self.ramp_result = self.held_ok
                 return
-            held_ok = len(self.active())
-            self.log(f"stable at {held_ok} stream(s)")
+            if self.stop.is_set():
+                break
+            self.held_ok = len(self.active())
+            self.log(f"stable at {self.held_ok} stream(s)")
+        if self.ramp_result is None:
+            self.ramp_result = self.held_ok
+            self.ramp_reason = "stopped before any level degraded (result is a lower bound)"
 
     async def _hold(self, secs: float) -> bool:
         """Hold the current level for `secs`, extended (up to 3x) while any viewer is
@@ -423,6 +447,50 @@ class Runner:
         while True:
             live.update(self.render())
             await asyncio.sleep(0.5)
+
+    async def _status_loop(self) -> None:
+        while True:
+            emit(self.status())
+            await asyncio.sleep(self.args.status_interval)
+
+    async def _watch_stop_file(self) -> None:
+        while not self.stop.is_set():
+            try:
+                with open(self.args.stop_file) as f:
+                    flag = f.read().strip().strip('"').lower()
+            except OSError:
+                flag = ""
+            if flag in ("1", "true", "yes", "stop"):
+                self.stopped_by_user = True
+                self.log("stop requested")
+                self.stop.set()
+                return
+            await asyncio.sleep(2)
+
+    def stream_row(self, s: Stream) -> dict:
+        p = s.player
+        sp = p.speed()
+        return {
+            "idx": s.idx, "mode": s.mode, "item": s.label,
+            "source": describe_video(video_stream(first_source(s.item))),
+            "state": p.state, "buffer_s": round(p.buffer, 1),
+            "fill_x": round(sp, 2) if sp else None,
+            "startup_s": round(p.startup_s, 1) if p.startup_s else None,
+            "stalls": p.stalls, "stall_s": round(p.stall_s, 1),
+            "server_fps": s.srv_fps, "source_fps": s.src_fps,
+            "hw_accel": s.srv_hw, "server_codecs": s.srv_codec, "error": s.error,
+        }
+
+    def status(self) -> dict:
+        now = time.monotonic()
+        mbit = sum(x.player.bytes for x in self.streams) * 8 / 1e6 / max(now - self.t0, 1)
+        return {
+            "type": "status", "t": round(now - self.t0, 1), "server": self.args.server,
+            "mode": "ramp" if self.args.ramp else "fixed", "active": len(self.active()),
+            "streams_total": len(self.streams), "held_ok": self.held_ok if self.args.ramp else None,
+            "mbit_s": round(mbit, 1), "stopping": self.stop.is_set(),
+            "streams": [self.stream_row(s) for s in self.streams[-40:]],
+        }
 
     def render(self):
         now = time.monotonic()
@@ -454,6 +522,8 @@ class Runner:
         return {
             "server": self.args.server, "run_id": self.run_id,
             "args": {k: v for k, v in vars(self.args).items() if k not in ("password", "api_key")},
+            "stopped_by_user": self.stopped_by_user,
+            "duration_s": round(time.monotonic() - self.t0, 1),
             "ramp_result_streams": self.ramp_result, "ramp_reason": self.ramp_reason,
             "streams_total": len(self.streams),
             "errors": sum(1 for s in self.streams if s.player.state == "error"),
@@ -465,7 +535,7 @@ class Runner:
         }
 
 
-def parse_args(argv=None):
+def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     g = p.add_argument_group("server")
     g.add_argument("--server", required=True, help="e.g. https://jellyfin-public-test.amer.dev")
@@ -515,6 +585,17 @@ def parse_args(argv=None):
 
     p.add_argument("--out", help="write JSON report here")
     p.add_argument("--seed", type=int, help="random seed (item choice/start positions)")
+
+    g = p.add_argument_group("output (for running in a pod)")
+    g.add_argument("--jsonl", action="store_true",
+                   help="no terminal table: print JSON lines to stdout (event, status, and a final report)")
+    g.add_argument("--status-interval", type=float, default=5, help="--jsonl: s between status lines")
+    g.add_argument("--stop-file", help="stop gracefully once this file contains true/1/yes/stop")
+    return p
+
+
+def parse_args(argv=None, parser: argparse.ArgumentParser | None = None):
+    p = parser or build_parser()
     a = p.parse_args(argv)
     a.password = a.password or os.environ.get("JF_PASSWORD", "")
     a.api_key = a.api_key or os.environ.get("JF_API_KEY")
@@ -558,7 +639,10 @@ async def amain(args) -> dict:
 def main() -> None:
     args = parse_args()
     rep = asyncio.run(amain(args))
-    print_summary(rep)
+    if args.jsonl:
+        emit({"type": "report", "report": rep})
+    else:
+        print_summary(rep)
     if args.out:
         with open(args.out, "w") as f:
             json.dump(rep, f, indent=2)

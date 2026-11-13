@@ -1,0 +1,326 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jellyfin Stress Test</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #1d2330; --muted: #5d6676; --border: #dde1e8;
+  --accent: #3b5bdb; --accent-text: #ffffff; --ok: #2b8a3e; --warn: #b7791f; --bad: #c92a2a;
+  --code: #eef1f6; --row: #f9fafc;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171d; --panel: #1c2028; --text: #e3e7ee; --muted: #9aa3b2; --border: #2e3440;
+    --accent: #6d8bff; --accent-text: #0d1020; --ok: #5cc171; --warn: #e0a84a; --bad: #ff6b6b;
+    --code: #232833; --row: #20252e;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+header { padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--panel);
+  display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+header h1 { font-size: 18px; margin: 0; }
+header span { color: var(--muted); }
+main { display: grid; grid-template-columns: minmax(340px, 470px) 1fr; gap: 16px; padding: 16px 20px; }
+@media (max-width: 900px) { main { grid-template-columns: minmax(0, 1fr); padding: 12px 16px; } }
+section.panel { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px; min-width: 0; }
+h2 { font-size: 15px; margin: 0 0 10px; }
+fieldset { border: 1px solid var(--border); border-radius: 6px; margin: 0 0 12px; padding: 8px 10px 4px; }
+legend { font-weight: 600; padding: 0 4px; text-transform: capitalize; }
+.field { display: grid; grid-template-columns: 140px minmax(0, 1fr); gap: 6px 10px; align-items: start; margin-bottom: 8px; }
+.field label { font-family: ui-monospace, monospace; font-size: 12px; padding-top: 5px; overflow-wrap: anywhere; }
+.field .help { grid-column: 2; color: var(--muted); font-size: 12px; margin-top: -4px; }
+input[type=text], input[type=number], select, textarea {
+  width: 100%; padding: 5px 7px; border: 1px solid var(--border); border-radius: 5px;
+  background: var(--bg); color: var(--text); font: inherit; }
+textarea { font-family: ui-monospace, monospace; font-size: 12px; min-height: 52px; resize: vertical; }
+input[type=checkbox] { margin-top: 7px; justify-self: start; }
+button { padding: 6px 12px; border-radius: 5px; border: 1px solid var(--border); background: var(--panel);
+  color: var(--text); font: inherit; cursor: pointer; }
+button.primary { background: var(--accent); color: var(--accent-text); border-color: var(--accent); font-weight: 600; }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.presets button { font-size: 12px; padding: 4px 8px; }
+pre, code { background: var(--code); border-radius: 5px; font-family: ui-monospace, monospace; font-size: 12px; }
+pre { padding: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; }
+.msg { margin: 8px 0; font-size: 13px; }
+.msg.err { color: var(--bad); }
+table { border-collapse: collapse; width: 100%; font-size: 12.5px; }
+th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+th { color: var(--muted); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+tr.run { cursor: pointer; }
+tr.run:hover, tr.run.sel { background: var(--row); }
+.scroll { overflow-x: auto; }
+.badge { display: inline-block; padding: 1px 7px; border-radius: 10px; font-size: 11.5px; font-weight: 600;
+  border: 1px solid currentColor; }
+.s-running, .s-playing, .s-succeeded { color: var(--ok); }
+.s-pending, .s-starting, .s-stopping, .s-init { color: var(--warn); }
+.s-failed, .s-error, .s-stalled { color: var(--bad); }
+.s-done, .s-suspended { color: var(--muted); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 14px; margin: 8px 0; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.big { font-size: 22px; font-weight: 700; }
+.events { max-height: 260px; overflow-y: auto; }
+.muted { color: var(--muted); }
+#detail:empty { display: none; }
+.help { overflow-wrap: anywhere; }
+@media (max-width: 480px) { .field { grid-template-columns: 104px minmax(0, 1fr); } header { padding: 12px 16px; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Jellyfin stress test</h1>
+  <span id="ns"></span>
+</header>
+<main>
+  <section class="panel">
+    <h2>New run</h2>
+    <div class="row presets" id="presets" style="margin-bottom:12px"></div>
+    <form id="form" autocomplete="off"></form>
+    <pre id="preview" class="muted"></pre>
+    <div class="row">
+      <button class="primary" id="start">Start run</button>
+      <label class="row"><input type="checkbox" id="concurrent"> allow concurrent runs</label>
+    </div>
+    <div class="msg" id="formmsg"></div>
+  </section>
+  <div style="display:grid; gap:16px; align-content:start; min-width:0">
+    <section class="panel">
+      <h2>Runs</h2>
+      <div class="scroll"><table id="runs"><thead><tr>
+        <th>started</th><th>state</th><th>test</th><th class="num">result</th><th>node</th>
+      </tr></thead><tbody></tbody></table></div>
+      <div class="msg muted" id="runsmsg"></div>
+    </section>
+    <section class="panel" id="detail"></section>
+  </div>
+</main>
+<script>
+"use strict";
+const $ = (s, el = document) => el.querySelector(s);
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+let OPTS = null, selected = null, detailTimer = null;
+
+async function api(method, path, body) {
+  const r = await fetch(path, {method, headers: body ? {"Content-Type": "application/json"} : {},
+                               body: body ? JSON.stringify(body) : undefined});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.statusText);
+  return j;
+}
+
+// Scenarios from the README; values not listed reset to the defaults.
+const PRESETS = {
+  "4K HDR → 1080p h264 ramp": {ramp: true, mix: "transcode", filter: "4k,hdr"},
+  "1080p → 720p 4 Mbps ramp": {ramp: true, mix: "transcode", filter: "1080p", max_height: 720, bitrate: 4000000},
+  "Household mix (8 fixed)": {ramp: false, streams: 8, mix: "transcode=2,remux=2,direct=4", duration: 900},
+  "Subtitle burn-in ramp": {ramp: true, mix: "transcode", burn_subs: true},
+  "HEVC output ramp": {ramp: true, mix: "transcode", codec: "hevc"},
+};
+
+function fieldInput(f) {
+  const id = "f_" + f.dest, d = f.default;
+  if (f.kind === "bool") return `<input type="checkbox" id="${id}" name="${f.dest}" ${d ? "checked" : ""}>`;
+  if (f.kind === "choice") return `<select id="${id}" name="${f.dest}">${f.choices.map(c =>
+      `<option ${c === d ? "selected" : ""}>${esc(c)}</option>`).join("")}</select>`;
+  if (f.kind === "list") return `<textarea id="${id}" name="${f.dest}" placeholder="one per line">${esc((d || []).join("\n"))}</textarea>`;
+  const num = f.kind === "int" || f.kind === "float";
+  const list = f.dest === "server" && OPTS.server_presets.length ? ` list="servers"` : "";
+  return `<input type="${num ? "number" : "text"}" ${f.kind === "float" ? 'step="any"' : ""} id="${id}" name="${f.dest}"
+          value="${esc(d ?? "")}"${list}${f.required ? " required" : ""}>`;
+}
+
+function renderForm() {
+  const groups = OPTS.groups.map(g => `<fieldset><legend>${esc(g.title)}</legend>${g.fields.map(f => `
+      <div class="field"><label for="f_${f.dest}">${esc(f.flag)}</label>${fieldInput(f)}
+      ${f.help ? `<div class="help">${esc(f.help)}</div>` : ""}</div>`).join("")}</fieldset>`).join("");
+  const p = OPTS.pod;
+  $("#form").innerHTML = groups + `
+    <datalist id="servers">${OPTS.server_presets.map(s => `<option value="${esc(s)}">`).join("")}</datalist>
+    <fieldset><legend>run pod</legend>
+      <div class="field"><label for="p_ns">nodeSelector</label>
+        <textarea id="p_ns">${esc(JSON.stringify(p.node_selector, null, 1))}</textarea>
+        <div class="help">JSON object. Default from tofu.</div></div>
+      <div class="field"><label for="p_tol">tolerations</label>
+        <textarea id="p_tol" rows="4">${esc(JSON.stringify(p.tolerations, null, 1))}</textarea>
+        <div class="help">JSON list. Default from tofu.</div></div>
+      <div class="field"><label for="p_max">max run s</label>
+        <input type="number" id="p_max" value="${p.max_run_seconds}">
+        <div class="help">Job activeDeadlineSeconds: the run is killed after this.</div></div>
+    </fieldset>`;
+  $("#presets").innerHTML = Object.keys(PRESETS).map(k => `<button type="button">${esc(k)}</button>`).join("");
+  $("#presets").querySelectorAll("button").forEach(b => b.onclick = () => applyPreset(PRESETS[b.textContent]));
+  $("#form").addEventListener("input", schedulePreview);
+  $("#form").addEventListener("change", schedulePreview);
+}
+
+function applyPreset(p) {
+  for (const g of OPTS.groups) for (const f of g.fields) {
+    if (["server", "username", "insecure", "timeout"].includes(f.dest)) continue;
+    const el = $("#f_" + f.dest), v = f.dest in p ? p[f.dest] : f.default;
+    if (f.kind === "bool") el.checked = !!v;
+    else if (f.kind === "list") el.value = (v || []).join("\n");
+    else el.value = v ?? "";
+  }
+  schedulePreview();
+}
+
+function collect() {
+  const form = {};
+  for (const g of OPTS.groups) for (const f of g.fields) {
+    const el = $("#f_" + f.dest);
+    if (f.kind === "bool") form[f.dest] = el.checked;
+    else if (f.kind === "list") form[f.dest] = el.value.split("\n").map(s => s.trim()).filter(Boolean);
+    else form[f.dest] = el.value.trim();
+  }
+  return {form, pod: {node_selector: $("#p_ns").value, tolerations: $("#p_tol").value,
+                      max_run_seconds: $("#p_max").value},
+          allow_concurrent: $("#concurrent").checked};
+}
+
+let pvTimer = null;
+function schedulePreview() { clearTimeout(pvTimer); pvTimer = setTimeout(preview, 250); }
+async function preview() {
+  try {
+    const r = await api("POST", "/api/preview", {form: collect().form});
+    $("#preview").textContent = r.command + (r.error ? "\n\n✗ " + r.error : "");
+    $("#preview").classList.toggle("msg", false);
+    $("#start").disabled = !!r.error;
+  } catch (e) { $("#preview").textContent = e.message; }
+}
+
+$("#start").onclick = async () => {
+  const msg = $("#formmsg");
+  msg.className = "msg"; msg.textContent = "starting…";
+  $("#start").disabled = true;
+  try {
+    const r = await api("POST", "/api/runs", collect());
+    msg.textContent = "started " + r.name;
+    await loadRuns();
+    select(r.name);
+  } catch (e) { msg.className = "msg err"; msg.textContent = e.message; }
+  finally { $("#start").disabled = false; }
+};
+
+const badge = s => `<span class="badge s-${esc(s)}">${esc(s)}</span>`;
+const when = t => t ? new Date(t).toLocaleString([], {month: "short", day: "numeric", hour: "2-digit", minute: "2-digit"}) : "";
+function testLabel(r) {
+  const parts = [r.mode, r.mix];
+  if (r.mode === "fixed" && r.streams) parts.push(r.streams + " streams");
+  if (r.filter) parts.push(r.filter);
+  return parts.filter(Boolean).join(" · ");
+}
+function resultLabel(r) {
+  const x = r.result;
+  if (!x) return "";
+  if (x.ramp_result_streams != null) return `<b>${x.ramp_result_streams}</b> streams`;
+  return `${x.stalls_total} stalls`;
+}
+
+async function loadRuns() {
+  try {
+    const {runs} = await api("GET", "/api/runs");
+    $("#runs tbody").innerHTML = runs.map(r => `
+      <tr class="run ${r.name === selected ? "sel" : ""}" data-name="${esc(r.name)}">
+        <td>${when(r.created)}</td><td>${badge(r.state)}</td><td>${esc(testLabel(r))}</td>
+        <td class="num">${resultLabel(r)}</td><td>${esc(r.node || "")}</td></tr>`).join("");
+    $("#runs tbody").querySelectorAll("tr").forEach(tr => tr.onclick = () => select(tr.dataset.name));
+    $("#runsmsg").textContent = runs.length ? "" : "No runs yet. Finished runs are kept for "
+      + Math.round(OPTS.ttl_seconds / 86400) + " days.";
+  } catch (e) { $("#runsmsg").textContent = e.message; }
+}
+
+function select(name) {
+  selected = name;
+  document.querySelectorAll("tr.run").forEach(tr => tr.classList.toggle("sel", tr.dataset.name === name));
+  clearTimeout(detailTimer);
+  loadDetail();
+}
+
+function streamTable(st) {
+  const rows = (st.streams || []).map(s => {
+    const fps = s.server_fps ? Math.round(s.server_fps) + (s.source_fps ? ` (${(s.server_fps / s.source_fps).toFixed(1)}x)` : "") : "";
+    const fill = s.fill_x == null ? "" : s.fill_x > 9 ? "≥9" : s.fill_x.toFixed(2);
+    return `<tr><td class="num">${s.idx}</td><td>${esc(s.mode)}</td><td>${esc(String(s.item).slice(0, 32))}</td>
+      <td>${esc(s.source)}</td><td>${badge(s.state)}</td><td class="num">${s.buffer_s.toFixed(0)}</td>
+      <td class="num">${fill}</td><td class="num">${s.startup_s ?? ""}</td>
+      <td class="num">${s.stalls}${s.stall_s ? ` (${Math.round(s.stall_s)}s)` : ""}</td>
+      <td class="num">${fps}</td><td>${esc(s.hw_accel)}</td><td>${esc(s.server_codecs)}</td></tr>`;
+  }).join("");
+  return `<div class="scroll"><table><thead><tr><th class="num">#</th><th>mode</th><th>item</th><th>source</th>
+    <th>state</th><th class="num">buf s</th><th class="num">fill x</th><th class="num">startup</th>
+    <th class="num">stalls</th><th class="num">srv fps</th><th>hw</th><th>out</th></tr></thead>
+    <tbody>${rows}</tbody></table></div>`;
+}
+
+function reportBlock(x) {
+  const head = x.ramp_result_streams != null
+    ? `<div class="big">${x.ramp_result_streams} concurrent stream(s) held</div><div class="muted">${esc(x.ramp_reason)}</div>`
+    : `<div class="big">${x.streams_total} streams, ${x.stalls_total} stalls</div>`;
+  return head + `<dl class="kv">
+    <dt>streams</dt><dd>${x.streams_total} (errors ${x.errors})</dd>
+    <dt>stalls</dt><dd>${x.stalls_total} (${x.stall_seconds_total} s)</dd>
+    <dt>startup</dt><dd>p50 ${x.startup_p50_s ?? "–"} s, max ${x.startup_max_s ?? "–"} s</dd>
+    <dt>duration</dt><dd>${x.duration_s ?? "–"} s${x.stopped_by_user ? " (stopped by user)" : ""}</dd></dl>`;
+}
+
+async function loadDetail() {
+  const name = selected;
+  if (!name) return;
+  let d;
+  try { d = await api("GET", `/api/runs/${name}`); }
+  catch (e) { $("#detail").innerHTML = `<div class="msg err">${esc(e.message)}</div>`; return; }
+  if (name !== selected) return;
+  const live = d.live || {}, st = live.status, active = ["starting", "pending", "running", "stopping"].includes(d.state);
+  const rep = live.report;
+  let html = `<div class="row" style="justify-content:space-between"><h2 style="margin:0">${esc(d.name)} ${badge(d.state)}</h2>
+    <div class="row">
+      ${d.state === "running" ? `<button id="b_stop">Stop</button>` : ""}
+      <a href="/api/runs/${esc(d.name)}/report.json"><button ${rep || d.result ? "" : "disabled"}>Report JSON</button></a>
+      <a href="/api/runs/${esc(d.name)}/log.txt"><button>Log</button></a>
+      <button class="danger" id="b_del">${active ? "Kill" : "Delete"}</button></div></div>`;
+  if (d.reason) html += `<div class="msg ${d.state === "failed" ? "err" : ""}">${esc(d.reason)}</div>`;
+  if (d.pod_events && d.pod_events.length) html += `<pre>${esc(d.pod_events.join("\n"))}</pre>`;
+  html += `<dl class="kv"><dt>server</dt><dd>${esc(d.server)}</dd><dt>node</dt><dd>${esc(d.node || "–")}</dd>
+    <dt>started</dt><dd>${when(d.created)}</dd>${d.finished ? `<dt>finished</dt><dd>${when(d.finished)}</dd>` : ""}</dl>`;
+  if (rep) html += reportBlock(rep);
+  else if (d.result) html += reportBlock(d.result);
+  if (st) html += `<h2 style="margin-top:14px">Streams <span class="muted" style="font-weight:400">
+      t=${Math.round(st.t)} s · active ${st.active}${st.held_ok != null ? ` · held ${st.held_ok}` : ""} · ≈${st.mbit_s} Mbit/s</span></h2>` + streamTable(st);
+  const evs = (rep ? rep.events : (live.events || []).map(e => `[${String(Math.round(e.t)).padStart(6)}s] ${e.msg}`));
+  if (evs && evs.length) html += `<h2 style="margin-top:14px">Events</h2><pre class="events">${esc(evs.slice(-200).join("\n"))}</pre>`;
+  if (live.other && live.other.length) html += `<h2 style="margin-top:14px">Other output</h2><pre class="events">${esc(live.other.join("\n"))}</pre>`;
+  html += `<details><summary class="muted">Command</summary><pre>${esc(d.command)}</pre>
+    <pre>${esc(JSON.stringify(d.pod, null, 1))}</pre></details>`;
+  $("#detail").innerHTML = html;
+  const stop = $("#b_stop");
+  if (stop) stop.onclick = async () => {
+    stop.disabled = true;
+    try { await api("POST", `/api/runs/${name}/stop`, {}); } catch (e) { alert(e.message); }
+    loadDetail();
+  };
+  $("#b_del").onclick = async () => {
+    if (!confirm((active ? "Kill" : "Delete") + ` ${name}? Its log and report go with it.`)) return;
+    try { await api("DELETE", `/api/runs/${name}`); } catch (e) { alert(e.message); return; }
+    selected = null; $("#detail").innerHTML = ""; loadRuns();
+  };
+  if (active) detailTimer = setTimeout(loadDetail, 3000);
+}
+
+(async () => {
+  OPTS = await api("GET", "/api/options");
+  $("#ns").textContent = "runs as Jobs in namespace " + OPTS.namespace;
+  renderForm();
+  preview();
+  await loadRuns();
+  setInterval(loadRuns, 5000);
+})().catch(e => { $("#formmsg").className = "msg err"; $("#formmsg").textContent = e.message; });
+</script>
+</body>
+</html>
