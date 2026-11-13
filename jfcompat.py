@@ -29,7 +29,7 @@ from urllib.parse import parse_qs, urlsplit
 import httpx
 
 from compat_profiles import DEVICES
-from jfcore import auth_header, describe_video, first_source, item_label, video_stream
+from jfcore import auth_header, describe_video, first_source, item_label, report_lines, video_stream
 
 CLIENT = "jfcompat"
 # Reasons that mean the video itself has to be re-encoded.
@@ -253,6 +253,14 @@ class Report:
         }
 
 
+def compat_result(rep: dict) -> dict:
+    out = {"kind": "compat", "files": len(rep.get("items") or []), "transcode_pct": {}}
+    for d in rep.get("devices") or []:
+        c = rep["summary"][d["id"]]["no_subs"]
+        out["transcode_pct"][d["id"]] = round(100 * c["transcode"] / (sum(c.values()) or 1))
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--server", required=True)
@@ -292,7 +300,8 @@ def main() -> None:
         with open(args.out, "w") as f:
             json.dump(rep, f)
     if args.jsonl:
-        emit({"type": "report", "report": rep})
+        for line in report_lines(rep, compat_result(rep)):
+            print(line, flush=True)
     else:
         for d in rep["devices"]:
             s = rep["summary"][d["id"]]

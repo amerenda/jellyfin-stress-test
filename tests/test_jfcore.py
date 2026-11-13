@@ -1,4 +1,5 @@
 """Unit tests for jfcore item selection: python -m unittest discover -s tests"""
+import json
 import os
 import sys
 import unittest
@@ -91,6 +92,27 @@ class StallModel(unittest.TestCase):
         p.got_media(10, 4, 1)              # resumes once 4 s are buffered
         self.assertEqual(p.state, "playing")
         self.assertEqual(events, ["stall", 3.0])
+
+
+
+class ReportLines(unittest.TestCase):
+    def test_round_trip_and_line_size(self):
+        import random
+        rep = {"type": "compat", "items": [{"title": f"t{i}", "x": random.random()} for i in range(20000)]}
+        lines = jfcore.report_lines(rep, {"files": 20000})
+        self.assertGreater(len(lines), 3)
+        self.assertTrue(all(len(l) < 16000 for l in lines))
+        last = json.loads(lines[-1])
+        self.assertEqual((last["type"], last["parts"]), ("result", len(lines) - 1))
+        noise = ['{"type":"status","t":1}', "plain text"]
+        self.assertEqual(jfcore.read_report(noise + lines), rep)
+        self.assertEqual(jfcore.read_report(list(reversed(lines[:-1]))), rep)   # order of parts doesn't matter
+        self.assertIsNone(jfcore.read_report(lines[1:]))                        # a part missing
+
+    def test_legacy_single_line(self):
+        rep = {"a": 1}
+        self.assertEqual(jfcore.read_report([json.dumps({"type": "report", "report": rep})]), rep)
+        self.assertIsNone(jfcore.read_report(['{"type":"report","report":{"a":']))  # split line
 
 
 if __name__ == "__main__":

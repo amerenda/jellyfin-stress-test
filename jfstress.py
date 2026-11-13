@@ -35,7 +35,7 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
-from jfcore import (CLIENT, SOURCE_FILTERS, TICKS, HealthConfig, Player, auth_header, describe_video,
+from jfcore import (CLIENT, SOURCE_FILTERS, TICKS, report_lines, HealthConfig, Player, auth_header, describe_video,
                     first_source, item_label, item_matches, items_query, method_for,
                     parse_filter, parse_m3u8, parse_mix, playback_info_body, seek_index, subtitle_codecs,
                     transcoding_url, video_stream)
@@ -511,7 +511,7 @@ class Runner:
             "mode": "ramp" if self.args.ramp else "fixed", "active": len(self.active()),
             "streams_total": len(self.streams), "held_ok": self.held_ok if self.args.ramp else None,
             "mbit_s": round(mbit, 1), "stopping": self.stop.is_set(),
-            "streams": [self.stream_row(s) for s in self.streams[-40:]],
+            "streams": [self.stream_row(s) for s in self.streams[-30:]],  # keep the line under 16 KB
         }
 
     def render(self):
@@ -666,7 +666,11 @@ def main() -> None:
     args = parse_args()
     rep = asyncio.run(amain(args))
     if args.jsonl:
-        emit({"type": "report", "report": rep})
+        result = {k: rep.get(k) for k in ("ramp_result_streams", "ramp_reason", "streams_total", "errors",
+                                          "stalls_total", "stall_seconds_total", "startup_p50_s",
+                                          "startup_max_s", "stopped_by_user", "duration_s")}
+        for line in report_lines(rep, result):
+            print(line, flush=True)
     else:
         print_summary(rep)
     if args.out:
