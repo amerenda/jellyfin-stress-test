@@ -27,8 +27,12 @@ https://jellyfin-stress.amer.dev (LAN only, no login) by the dean-tofu root `k3s
 
 - **Every CLI option is in the form.** The fields are read from `jfstress.build_parser()`, so a new
   flag shows up in the UI without UI changes. The page shows the equivalent command line and
-  validates it with the CLI's own parser before it starts anything. Preset buttons fill in the
-  scenarios listed below.
+  validates it with the CLI's own parser before it starts anything.
+- **Pre-canned tests** (`PRESETS` in `webui/app.py`), grouped by what they stress: GPU transcode
+  (baseline, 720p remote, HEVC output, 4K HDR, Dolby Vision, one-file 4K), CPU fallback (AV1 source,
+  10-bit H.264), subtitle burn-in (ASS, PGS on 4K HDR, DVD, SRT), throughput (high-bitrate remux,
+  4K direct) and realistic mixes. Each button explains what it measures; most are ramps that stop
+  at the first level a viewer would notice.
 - **Each run is one pod.** It runs `jfstress.py --jsonl`, logs in as the form's user with the password
   from Secret `jellyfin-stress-jellyfin` (BWS `prod-jellyfin-public-admin-password`), and prints JSON
   lines: events, a status line every 5 s, and the final report. The UI reads them from the pod log.
@@ -98,7 +102,22 @@ Use a test instance or a quiet time. A ramp run deliberately pushes the server u
 
 - `direct`: direct play. Fetches `/Videos/{id}/stream?static=true` paced at the file's bitrate. Measures disk and network, not CPU.
 - `remux`: direct stream to HLS with stream copy. Cheap for the CPU, but goes through ffmpeg and the transcode directory.
-- `transcode`: full video and audio transcode to `--codec` (h264/hevc/av1), at most `--max-height` and `--bitrate`. Pick heavy sources with `--filter 4k,hdr` (adds tone mapping) and `--burn-subs` (subtitle burn-in).
+- `transcode`: full video and audio transcode to `--codec` (h264/hevc/av1), at most `--max-height` and `--bitrate`. Pick heavy sources with `--filter` and add `--burn-subs` for subtitle burn-in.
+
+### Picking files (`--filter`)
+
+Comma list; a file must match every token. Without a filter, 400 random files are used; with one, the
+whole library is searched (about 20 s for 6,000 files) so rare formats are found.
+
+| Kind | Tokens |
+|---|---|
+| Resolution (by width, so 2.39:1 files count) | `4k`, `1080p`, `720p`, `sd` |
+| Range | `hdr`, `sdr`, `dovi`, `hdr10`, `hdr10plus` |
+| Codec | `h264`, `hevc`, `av1`, `vp9`, `mpeg4`, `mpeg2video`, `vc1` |
+| Traits | `10bit`, `hi10p` (10-bit H.264), `interlaced`, `highbitrate` (over 40 Mbps) |
+| Subtitles | `ass`, `pgs`, `dvdsub`, `srt`: the file has one; with `--burn-subs` that track is burned in |
+
+Each stall (buffer ran dry) and resume is logged as an event with its length.
 
 Combine them: `--mix transcode=3,direct=1`. In fixed mode the pattern is repeated until there are
 `--streams` streams. In ramp mode it sets the order in which streams are added.
@@ -121,7 +140,7 @@ contains `true`, `1`, `yes` or `stop`. The k3s web UI uses both.
 ### Useful scenarios
 
 ```sh
-# The heavy case: 4K HDR -> 1080p h264 with tone mapping
+# 4K HDR -> 1080p h264 (tone mapping too, if enabled in Jellyfin)
 --ramp --mix transcode --filter 4k,hdr
 # Typical: 1080p h264 sources transcoded down to 720p 4 Mbps (remote viewers)
 --ramp --mix transcode --filter 1080p --max-height 720 --bitrate 4000000

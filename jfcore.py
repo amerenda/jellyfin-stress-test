@@ -13,7 +13,15 @@ CLIENT = "jfstress"
 TICKS = 10_000_000
 MODES = ("direct", "remux", "transcode")
 AUDIO_COPY = "aac,mp3,ac3,eac3,opus,flac,dts,truehd,alac,vorbis"
-SOURCE_FILTERS = ("4k", "1080p", "hdr", "sdr", "h264", "hevc", "av1", "vp9", "mpeg2video", "vc1")
+# --filter tokens. A file must match every token given.
+RES_FILTERS = ("4k", "1080p", "720p", "sd")
+RANGE_FILTERS = ("hdr", "sdr", "dovi", "hdr10", "hdr10plus")
+CODEC_FILTERS = ("h264", "hevc", "av1", "vp9", "mpeg4", "mpeg2video", "vc1")
+TRAIT_FILTERS = ("10bit", "hi10p", "interlaced", "highbitrate")
+# Subtitle tokens: the file has a subtitle of that format; with --burn-subs, that track is burned in.
+SUB_FILTERS = {"ass": ("ass", "ssa"), "pgs": ("pgssub",), "dvdsub": ("dvdsub",), "srt": ("subrip", "srt")}
+SOURCE_FILTERS = RES_FILTERS + RANGE_FILTERS + CODEC_FILTERS + TRAIT_FILTERS + tuple(SUB_FILTERS)
+HIGH_BITRATE = 40_000_000
 
 
 # --------------------------------------------------------------------------- auth
@@ -66,8 +74,21 @@ def device_profile(mode: str, codec: str, max_bitrate: int, max_height: int | No
     return profile
 
 
+def subtitle_codecs(filt: set[str]) -> set[str]:
+    """Subtitle codecs named by the subtitle tokens of a filter (empty = any)."""
+    return {c for f in filt if f in SUB_FILTERS for c in SUB_FILTERS[f]}
+
+
+def pick_subtitle(source: dict, codecs: set[str] | None = None) -> dict | None:
+    subs = [m for m in source.get("MediaStreams", []) if m.get("Type") == "Subtitle"]
+    if codecs:
+        subs = [m for m in subs if (m.get("Codec") or "").lower() in codecs]
+    return subs[0] if subs else None
+
+
 def playback_info_body(mode: str, user_id: str, source: dict, start_s: float, *, codec: str,
-                       bitrate: int, max_height: int | None, burn_subs: bool) -> dict:
+                       bitrate: int, max_height: int | None, burn_subs: bool,
+                       sub_codecs: set[str] | None = None) -> dict:
     body = {
         "UserId": user_id,
         "DeviceProfile": device_profile(mode, codec, bitrate, max_height),
@@ -82,7 +103,7 @@ def playback_info_body(mode: str, user_id: str, source: dict, start_s: float, *,
         "MediaSourceId": source.get("Id"),
     }
     if burn_subs and mode == "transcode":
-        sub = next((m for m in source.get("MediaStreams", []) if m.get("Type") == "Subtitle"), None)
+        sub = pick_subtitle(source, sub_codecs)
         if sub:
             body["SubtitleStreamIndex"] = sub["Index"]
             body["DeviceProfile"]["SubtitleProfiles"] = [
@@ -139,11 +160,23 @@ def first_source(item: dict) -> dict:
 def describe_video(vs: dict | None) -> str:
     if not vs:
         return "?"
-    h = vs.get("Height") or 0
-    res = "4K" if h >= 1600 else f"{h}p"
+    res = resolution(vs)
     rng = vs.get("VideoRangeType") or vs.get("VideoRange") or ""
     rng = "" if rng in ("SDR", "") else f" {rng}"
-    return f"{res} {vs.get('Codec', '?')}{rng}"
+    bits = " 10bit" if (vs.get("BitDepth") or 8) > 8 and vs.get("Codec") == "h264" else ""
+    return f"{res} {vs.get('Codec', '?')}{bits}{rng}"
+
+
+def resolution(vs: dict) -> str:
+    """4k / 1080p / 720p / sd, by width or height so scope (2.39:1) files land in their class."""
+    w, h = vs.get("Width") or 0, vs.get("Height") or 0
+    if w >= 3200 or h >= 1600:
+        return "4K"
+    if w >= 1800 or h >= 900:
+        return "1080p"
+    if w >= 1200 or h >= 700:
+        return "720p"
+    return "SD"
 
 
 def item_label(item: dict) -> str:
@@ -163,24 +196,59 @@ def parse_filter(spec: str | None) -> set[str]:
 def item_matches(item: dict, filt: set[str], min_runtime_s: float = 600) -> bool:
     if (item.get("RunTimeTicks") or 0) < min_runtime_s * TICKS:
         return False
-    vs = video_stream(first_source(item))
+    src = first_source(item)
+    vs = video_stream(src)
     if vs is None:
         return False
-    h = vs.get("Height") or 0
+    res = resolution(vs).lower()
     codec = (vs.get("Codec") or "").lower()
+    rtype = (vs.get("VideoRangeType") or "").upper()
     hdr = (vs.get("VideoRange") or "SDR") != "SDR"
+    deep = (vs.get("BitDepth") or 8) > 8
     for f in filt:
-        if f == "4k" and h < 1600: return False
-        if f == "1080p" and not (900 <= h < 1600): return False
-        if f == "hdr" and not hdr: return False
-        if f == "sdr" and hdr: return False
-        if f not in ("4k", "1080p", "hdr", "sdr") and codec != f: return False
+        if f in RES_FILTERS:
+            ok = res == f
+        elif f == "hdr":
+            ok = hdr
+        elif f == "sdr":
+            ok = not hdr
+        elif f == "dovi":
+            ok = rtype.startswith("DOVI")
+        elif f == "hdr10":
+            ok = rtype in ("HDR10", "DOVIWITHHDR10")
+        elif f == "hdr10plus":
+            ok = "HDR10PLUS" in rtype
+        elif f == "10bit":
+            ok = deep
+        elif f == "hi10p":
+            ok = codec == "h264" and deep
+        elif f == "interlaced":
+            ok = bool(vs.get("IsInterlaced"))
+        elif f == "highbitrate":
+            ok = (src.get("Bitrate") or 0) > HIGH_BITRATE
+        elif f in SUB_FILTERS:
+            ok = pick_subtitle(src, set(SUB_FILTERS[f])) is not None
+        else:
+            ok = codec == f
+        if not ok:
+            return False
     return True
 
 
-def items_query(user_id: str, types: str, parent_id: str | None = None) -> dict:
+def items_query(user_id: str, types: str, parent_id: str | None = None,
+                filt: set[str] | None = None, start: int = 0, limit: int = 400) -> dict:
+    """/Items query. Without a filter: `limit` random items. With one, page through the whole
+    library (start/limit) so rare formats are found; the server pre-filters what it can."""
     q = {"userId": user_id, "Recursive": "true", "IncludeItemTypes": types, "MediaTypes": "Video",
-         "Fields": ITEM_FIELDS, "SortBy": "Random", "Limit": "400", "IsMissing": "false"}
+         "Fields": ITEM_FIELDS, "IsMissing": "false", "Limit": str(limit)}
+    if filt:
+        q.update({"SortBy": "SortName", "StartIndex": str(start)})
+        if "4k" in filt:
+            q["Is4K"] = "true"
+        if filt & set(SUB_FILTERS):
+            q["HasSubtitles"] = "true"
+    else:
+        q["SortBy"] = "Random"
     if parent_id:
         q["ParentId"] = parent_id
     return q
@@ -334,6 +402,7 @@ class Player:
 
     def degraded(self, now: float) -> str | None:
         """Reason a viewer would notice a problem right now, or None."""
+        self.tick(now)  # advance playback even while a segment fetch is blocked
         if self.state == "error":
             return "error"
         if self.state == "stalled":

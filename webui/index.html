@@ -44,7 +44,11 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
 button.danger { color: var(--bad); }
 button:disabled { opacity: .5; cursor: default; }
 .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.presets { display: grid; gap: 8px; }
 .presets button { font-size: 12px; padding: 4px 8px; }
+.presets button.on { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.pgroup > span { display: block; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 3px; }
+#presetnote { margin: 0; min-height: 2.6em; }
 pre, code { background: var(--code); border-radius: 5px; font-family: ui-monospace, monospace; font-size: 12px; }
 pre { padding: 8px; overflow-x: auto; white-space: pre-wrap; overflow-wrap: anywhere; margin: 8px 0; }
 .msg { margin: 8px 0; font-size: 13px; }
@@ -81,7 +85,7 @@ tr.run:hover, tr.run.sel { background: var(--row); }
 <main>
   <section class="panel">
     <h2>New run</h2>
-    <div class="row presets" id="presets" style="margin-bottom:12px"></div>
+    <div class="presets" id="presets" style="margin-bottom:12px"></div>
     <form id="form" autocomplete="off"></form>
     <pre id="preview" class="muted"></pre>
     <div class="row">
@@ -115,14 +119,6 @@ async function api(method, path, body) {
   return j;
 }
 
-// Scenarios from the README; values not listed reset to the defaults.
-const PRESETS = {
-  "4K HDR → 1080p h264 ramp": {ramp: true, mix: "transcode", filter: "4k,hdr"},
-  "1080p → 720p 4 Mbps ramp": {ramp: true, mix: "transcode", filter: "1080p", max_height: 720, bitrate: 4000000},
-  "Household mix (8 fixed)": {ramp: false, streams: 8, mix: "transcode=2,remux=2,direct=4", duration: 900},
-  "Subtitle burn-in ramp": {ramp: true, mix: "transcode", burn_subs: true},
-  "HEVC output ramp": {ramp: true, mix: "transcode", codec: "hevc"},
-};
 
 function fieldInput(f) {
   const id = "f_" + f.dest, d = f.default;
@@ -154,8 +150,17 @@ function renderForm() {
         <input type="number" id="p_max" value="${p.max_run_seconds}">
         <div class="help">Job activeDeadlineSeconds: the run is killed after this.</div></div>
     </fieldset>`;
-  $("#presets").innerHTML = Object.keys(PRESETS).map(k => `<button type="button">${esc(k)}</button>`).join("");
-  $("#presets").querySelectorAll("button").forEach(b => b.onclick = () => applyPreset(PRESETS[b.textContent]));
+  const pgroups = [...new Set(OPTS.presets.map(p => p.group))];
+  $("#presets").innerHTML = pgroups.map(g => `<div class="pgroup"><span class="muted">${esc(g)}</span>
+      <div class="row">${OPTS.presets.map((p, i) => p.group !== g ? "" :
+        `<button type="button" data-i="${i}" title="${esc(p.note)}">${esc(p.name)}</button>`).join("")}</div></div>`).join("")
+    + `<div class="msg muted" id="presetnote">Pick a test, or set the options below.</div>`;
+  $("#presets").querySelectorAll("button").forEach(b => b.onclick = () => {
+    const p = OPTS.presets[b.dataset.i];
+    $("#presets").querySelectorAll("button").forEach(x => x.classList.toggle("on", x === b));
+    $("#presetnote").textContent = p.note;
+    applyPreset(p.values);
+  });
   $("#form").addEventListener("input", schedulePreview);
   $("#form").addEventListener("change", schedulePreview);
 }
@@ -251,11 +256,11 @@ function streamTable(st) {
       <td>${esc(s.source)}</td><td>${badge(s.state)}</td><td class="num">${s.buffer_s.toFixed(0)}</td>
       <td class="num">${fill}</td><td class="num">${s.startup_s ?? ""}</td>
       <td class="num">${s.stalls}${s.stall_s ? ` (${Math.round(s.stall_s)}s)` : ""}</td>
-      <td class="num">${fps}</td><td>${esc(s.hw_accel)}</td><td>${esc(s.server_codecs)}</td></tr>`;
+      <td class="num">${fps}</td><td>${esc(s.hw_accel)}</td><td>${esc(s.server_codecs)}</td><td>${esc(s.subs || "")}</td></tr>`;
   }).join("");
   return `<div class="scroll"><table><thead><tr><th class="num">#</th><th>mode</th><th>item</th><th>source</th>
     <th>state</th><th class="num">buf s</th><th class="num">fill x</th><th class="num">startup</th>
-    <th class="num">stalls</th><th class="num">srv fps</th><th>hw</th><th>out</th></tr></thead>
+    <th class="num">stalls</th><th class="num">srv fps</th><th>hw</th><th>out</th><th>subs</th></tr></thead>
     <tbody>${rows}</tbody></table></div>`;
 }
 

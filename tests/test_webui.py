@@ -123,5 +123,23 @@ class LogParsing(unittest.TestCase):
         self.assertEqual(app.Runs.state({"spec": {}, "status": {}}, pod), ("pending", "0/6 nodes available"))
 
 
+
+class Presets(unittest.TestCase):
+    def test_every_preset_is_a_valid_run(self):
+        spec = app.option_spec({"server": "https://jf.example", "username": "alex"})
+        dests = {f["dest"] for g in spec for f in g["fields"]}
+        names = set()
+        for p in app.PRESETS:
+            with self.subTest(preset=p["name"]):
+                self.assertTrue(p["note"] and p["group"])
+                self.assertLessEqual(set(p["values"]), dests)
+                self.assertNotIn(p["name"], names)
+                names.add(p["name"])
+                form = defaults_form(spec) | p["values"]
+                a = app.validate_argv(app.build_argv(form, spec))
+                for k, v in p["values"].items():
+                    self.assertEqual(getattr(a, k), v)
+
+
 if __name__ == "__main__":
     unittest.main()

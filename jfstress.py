@@ -35,9 +35,9 @@ from rich.live import Live
 from rich.table import Table
 from rich.text import Text
 
-from jfcore import (CLIENT, TICKS, HealthConfig, Player, auth_header, describe_video,
+from jfcore import (CLIENT, SOURCE_FILTERS, TICKS, HealthConfig, Player, auth_header, describe_video,
                     first_source, item_label, item_matches, items_query, method_for,
-                    parse_filter, parse_m3u8, parse_mix, playback_info_body, seek_index,
+                    parse_filter, parse_m3u8, parse_mix, playback_info_body, seek_index, subtitle_codecs,
                     transcoding_url, video_stream)
 
 console = Console(stderr=True)
@@ -101,11 +101,20 @@ async def pick_items(jf: Jellyfin, args) -> list[dict]:
         if not lib:
             raise SystemExit(f"library {args.library!r} not found: {[l['Name'] for l in libs]}")
         parent = lib[0]["Id"]
-    items = (await jf.req("GET", "/Items", params=items_query(jf.user_id, args.types, parent))).json()["Items"]
     filt = parse_filter(args.filter)
-    items = [i for i in items if item_matches(i, filt)]
+    if not filt:
+        items = (await jf.req("GET", "/Items", params=items_query(jf.user_id, args.types, parent))).json()["Items"]
+    else:  # whole library, a page at a time, so rare formats (DV, Hi10P, ...) are found
+        items, start, page = [], 0, 500
+        while True:
+            r = (await jf.req("GET", "/Items", params=items_query(jf.user_id, args.types, parent, filt,
+                                                                   start, page))).json()
+            items += [i for i in r["Items"] if item_matches(i, filt)]
+            start += page
+            if start >= r.get("TotalRecordCount", 0) or not r["Items"]:
+                break
     if not items:
-        raise SystemExit("no items matched; loosen --filter/--library/--types")
+        raise SystemExit(f"no items matched --filter {args.filter!r}; loosen --filter/--library/--types")
     return items
 
 
@@ -123,6 +132,7 @@ class Stream:
     srv_codec: str = ""
     srv_reasons: str = ""
     src_fps: float | None = None
+    burn: str = ""
     replaced: bool = False
 
     @property
@@ -144,6 +154,7 @@ class Stream:
             "max_segment_fetch_s": round(p.seg_fetch_max, 2),
             "server_fps": self.srv_fps, "source_fps": self.src_fps, "hw_accel": self.srv_hw,
             "server_codecs": self.srv_codec, "transcode_reasons": self.srv_reasons,
+            "burned_subtitle": self.burn or None,
         }
 
 
@@ -200,7 +211,13 @@ class Runner:
             if a.random_start and runtime > 600:
                 start = random.uniform(60, max(61, runtime - a.duration - 120))
             body = playback_info_body(s.mode, jf.user_id, src, start, codec=a.codec,
-                                      bitrate=a.bitrate, max_height=a.max_height, burn_subs=a.burn_subs)
+                                      bitrate=a.bitrate, max_height=a.max_height, burn_subs=a.burn_subs,
+                                      sub_codecs=subtitle_codecs(parse_filter(a.filter)))
+            if "SubtitleStreamIndex" in body:
+                sub = next(m for m in src["MediaStreams"] if m.get("Index") == body["SubtitleStreamIndex"])
+                s.burn = (sub.get("Codec") or "?").lower()
+                self.log(f"#{s.idx} burning in {s.burn} subtitle (track {sub['Index']}"
+                         f"{', ' + sub['Language'] if sub.get('Language') else ''})")
             pi = (await jf.req("POST", f"/Items/{s.item['Id']}/PlaybackInfo",
                                params={"userId": jf.user_id}, json=body)).json()
             if pi.get("ErrorCode"):
@@ -342,6 +359,9 @@ class Runner:
     def add_stream(self, mode: str) -> Stream:
         idx = len(self.streams) + 1
         s = Stream(idx=idx, mode=mode, device_id=f"{CLIENT}-{self.run_id}-{idx:02d}", player=Player(self.cfg))
+        s.player.on_stall_start = lambda: self.log(
+            f"#{idx} stalled (buffer empty) at {s.player.played_s:.0f}s of playback")
+        s.player.on_stall_end = lambda d: self.log(f"#{idx} resumed after {d:.1f}s stalled")
         s.item = self.items[0] if self.args.same_item else self.items[(idx - 1) % len(self.items)]
         self.streams.append(s)
         self.tasks.append(asyncio.create_task(self.play(s)))
@@ -478,11 +498,13 @@ class Runner:
             "startup_s": round(p.startup_s, 1) if p.startup_s else None,
             "stalls": p.stalls, "stall_s": round(p.stall_s, 1),
             "server_fps": s.srv_fps, "source_fps": s.src_fps,
-            "hw_accel": s.srv_hw, "server_codecs": s.srv_codec, "error": s.error,
+            "hw_accel": s.srv_hw, "server_codecs": s.srv_codec, "subs": s.burn, "error": s.error,
         }
 
     def status(self) -> dict:
         now = time.monotonic()
+        for s in self.streams:
+            s.player.tick(now)
         mbit = sum(x.player.bytes for x in self.streams) * 8 / 1e6 / max(now - self.t0, 1)
         return {
             "type": "status", "t": round(now - self.t0, 1), "server": self.args.server,
@@ -494,6 +516,8 @@ class Runner:
 
     def render(self):
         now = time.monotonic()
+        for s in self.streams:
+            s.player.tick(now)
         t = Table(expand=False, pad_edge=False, box=None, header_style="bold")
         for col, j in (("#", "right"), ("mode", "left"), ("item", "left"), ("source", "left"),
                        ("state", "left"), ("buf s", "right"), ("fill x", "right"), ("startup", "right"),
@@ -560,14 +584,16 @@ def build_parser() -> argparse.ArgumentParser:
     g.add_argument("--codec", default="h264", choices=["h264", "hevc", "av1"], help="output video codec")
     g.add_argument("--bitrate", type=int, default=8_000_000, help="max streaming bitrate bps (default 8M)")
     g.add_argument("--max-height", type=int, default=1080, help="transcode: max output height (default 1080)")
-    g.add_argument("--burn-subs", action="store_true", help="transcode: burn in the first subtitle track")
+    g.add_argument("--burn-subs", action="store_true",
+                   help="transcode: burn in a subtitle track (the first one, or the first of the --filter subtitle format)")
     g.add_argument("--param", action="append", metavar="K=V",
                    help="override a TranscodingUrl query param, e.g. --param VideoBitrate=4000000")
 
     g = p.add_argument_group("media selection")
     g.add_argument("--types", default="Movie,Episode", help="item types (default Movie,Episode)")
     g.add_argument("--library", help="restrict to a library by name")
-    g.add_argument("--filter", help="comma list: 4k,1080p,hdr,sdr,h264,hevc,av1,vp9")
+    g.add_argument("--filter", help="comma list, all must match: " + ",".join(SOURCE_FILTERS)
+                   + ". Subtitle tokens (ass,pgs,dvdsub,srt) also pick the track --burn-subs burns in")
     g.add_argument("--item", action="append", help="explicit item id (repeatable)")
     g.add_argument("--same-item", action="store_true", help="every stream plays the same item")
     g.add_argument("--random-start", action="store_true", default=True,
