@@ -37,6 +37,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(HERE))
 import jfcompat  # noqa: E402
 import jfstress  # noqa: E402
+from jfcore import read_report  # noqa: E402
 
 GROUP = "jfstress.amer.dev"
 RUN_LABELS = {"app.kubernetes.io/name": "jfstress-run", "app.kubernetes.io/managed-by": "jfstress-ui"}
@@ -406,6 +407,20 @@ class Runs:
             return ("stopping" if stopping else "running"), ""
         return phase.lower() or "unknown", ""
 
+    def _report_from(self, pod: dict) -> dict | None:
+        """New runs end with N report parts and a result line saying N: read just those.
+        Older runs have one big report line, which only a read of the whole log gets intact."""
+        last = self._log_lines(pod, tailLines=1)
+        parts = None
+        if last and last[-1].startswith('{"type":"result"'):
+            try:
+                parts = int(json.loads(last[-1]).get("parts") or 0)
+            except ValueError:
+                parts = None
+        if parts:
+            return read_report(self._log_lines(pod, tailLines=parts + 1))
+        return read_report(self._log_lines(pod, limitBytes=LOG_LIMIT))
+
     def _log_lines(self, pod: dict, **params) -> list[str]:
         try:
             r = self.kube.req("GET", f"{self.pods}/{pod['metadata']['name']}/log",
@@ -416,8 +431,11 @@ class Runs:
 
     @staticmethod
     def parse_lines(lines: list[str]) -> dict:
-        status, report, events, other = None, None, [], []
+        status, result, events, other = None, None, [], []
+        report = read_report(lines)
         for ln in lines:
+            if ln.startswith(('{"type":"report', '{"type": "report')):
+                continue
             obj = None
             if ln.startswith("{"):
                 try:
@@ -433,19 +451,15 @@ class Runs:
                 status = obj
             elif t == "event":
                 events.append(obj)
-            elif t == "report":
-                report = obj.get("report")
-        return {"status": status, "report": report, "events": events[-200:], "other": other[-60:]}
+            elif t == "result":
+                result = obj.get("result")
+        return {"status": status, "report": report, "result": result,
+                "events": events[-200:], "other": other[-60:]}
 
     @staticmethod
     def result_summary(rep: dict) -> dict:
         if rep.get("type") == "compat":
-            out = {"kind": "compat", "files": len(rep.get("items") or []), "transcode_pct": {}}
-            for d in rep.get("devices") or []:
-                c = rep["summary"][d["id"]]["no_subs"]
-                n = sum(c.values()) or 1
-                out["transcode_pct"][d["id"]] = round(100 * c["transcode"] / n)
-            return out
+            return jfcompat.compat_result(rep)
         return {k: rep.get(k) for k in ("ramp_result_streams", "ramp_reason", "streams_total", "errors",
                                         "stalls_total", "stall_seconds_total", "startup_p50_s",
                                         "startup_max_s", "stopped_by_user", "duration_s")}
@@ -455,15 +469,16 @@ class Runs:
         state, why = self.state(job, pod)
         form = json.loads(ann.get(f"{GROUP}/form", "{}"))
         result = json.loads(ann[f"{GROUP}/result"]) if f"{GROUP}/result" in ann else None
-        if result is None and state in ("succeeded", "failed") and pod is not None:
-            rep = self.parse_lines(self._log_lines(pod, tailLines=3))["report"]
-            if rep:
-                result = self.result_summary(rep)
-                try:  # cache, so finished runs keep their result without re-reading logs
-                    self.kube.patch(f"{self.jobs}/{job['metadata']['name']}",
-                                    {"metadata": {"annotations": {f"{GROUP}/result": json.dumps(result)}}})
-                except KubeError:
-                    pass
+        if f"{GROUP}/result" not in ann and state in ("succeeded", "failed") and pod is not None:
+            result = self.parse_lines(self._log_lines(pod, tailLines=3))["result"]
+            if result is None:  # older runs: one report line
+                rep = self._report_from(pod)
+                result = self.result_summary(rep) if rep else None
+            try:  # cache, so finished runs are read once; "null" marks a run without a report
+                self.kube.patch(f"{self.jobs}/{job['metadata']['name']}",
+                                {"metadata": {"annotations": {f"{GROUP}/result": json.dumps(result)}}})
+            except KubeError:
+                pass
         return {
             "name": job["metadata"]["name"], "kind": ann.get(f"{GROUP}/kind", "stress"),
             "created": job["metadata"]["creationTimestamp"],
@@ -495,9 +510,13 @@ class Runs:
         out["command"] = command_line(json.loads(ann.get(f"{GROUP}/argv", "[]")),
                                       "jfcompat.py" if out["kind"] == "compat" else "jfstress.py")
         out["live"] = self.parse_lines(self._log_lines(pod, tailLines=400)) if pod else None
-        if out["kind"] == "compat" and out["live"] and out["live"].get("report"):
-            out["live"]["report"] = None  # large; the report page fetches it
-            out["has_report"] = True
+        finished = out["state"] in ("succeeded", "failed")
+        if out["kind"] == "compat":
+            if out["live"]:
+                out["live"]["report"] = None  # large; the report page fetches it
+            out["has_report"] = finished and out["result"] is not None
+        elif finished and pod and out["live"] is not None and out["live"]["report"] is None:
+            out["live"]["report"] = self._report_from(pod)
         if out["state"] in ("pending", "starting") and pod:
             evs = self.kube.req("GET", self.events, params={
                 "fieldSelector": f"involvedObject.name={pod['metadata']['name']}"}).json()["items"]
@@ -549,12 +568,12 @@ class Runs:
     def report(self, name: str) -> dict | None:
         self._own(name)
         pod = self._pod_for(name)
-        return self.parse_lines(self._log_lines(pod, tailLines=3))["report"] if pod else None
+        return self._report_from(pod) if pod else None
 
     def log(self, name: str) -> str:
         self._own(name)
         pod = self._pod_for(name)
-        return "\n".join(self._log_lines(pod, limitBytes=20_000_000)) if pod else ""
+        return "\n".join(self._log_lines(pod, limitBytes=LOG_LIMIT)) if pod else ""
 
     def _own(self, name: str) -> None:
         if not _is_run(self.kube.req("GET", f"{self.jobs}/{name}").json()):
@@ -569,6 +588,7 @@ def _is_run(job: dict) -> bool:
 # ---------- HTTP ----------
 
 NAME_OK = set("abcdefghijklmnopqrstuvwxyz0123456789-")
+LOG_LIMIT = 64_000_000
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -3,6 +3,9 @@ the player buffer model. Used by both the asyncio CLI (jfstress.py) and the Locu
 runner (locustfile.py)."""
 from __future__ import annotations
 
+import base64
+import gzip
+import json
 import re
 import statistics
 from dataclasses import dataclass, field
@@ -22,6 +25,44 @@ TRAIT_FILTERS = ("10bit", "hi10p", "interlaced", "highbitrate")
 SUB_FILTERS = {"ass": ("ass", "ssa"), "pgs": ("pgssub",), "dvdsub": ("dvdsub",), "srt": ("subrip", "srt")}
 SOURCE_FILTERS = RES_FILTERS + RANGE_FILTERS + CODEC_FILTERS + TRAIT_FILTERS + tuple(SUB_FILTERS)
 HIGH_BITRATE = 40_000_000
+
+
+# --------------------------------------------------------------------------- reports in pod logs
+# The container runtime splits log lines over 16 KB, and a split line breaks tail-based reads.
+# Reports go out gzipped and base64-encoded in parts well under that, then one small result line.
+REPORT_PART = 12_000
+
+
+def report_lines(report: dict, result: dict) -> list[str]:
+    blob = base64.b64encode(gzip.compress(
+        json.dumps(report, separators=(",", ":"), default=str).encode())).decode()
+    parts = [blob[i:i + REPORT_PART] for i in range(0, len(blob), REPORT_PART)] or [""]
+    lines = [json.dumps({"type": "report_part", "n": i, "of": len(parts), "gz": p}, separators=(",", ":"))
+             for i, p in enumerate(parts)]
+    lines.append(json.dumps({"type": "result", "result": result, "parts": len(parts)},
+                            separators=(",", ":"), default=str))
+    return lines
+
+
+def read_report(lines) -> dict | None:
+    """The report from log lines: reassembled parts, or a single legacy {"type":"report"} line."""
+    parts: dict[int, str] = {}
+    total = None
+    for ln in lines:
+        if not (ln.startswith("{") and '"report' in ln[:40]):
+            continue
+        try:
+            obj = json.loads(ln)
+        except ValueError:  # a legacy report line the runtime split
+            continue
+        if obj.get("type") == "report_part":
+            parts[obj["n"]] = obj["gz"]
+            total = obj["of"]
+        elif obj.get("type") == "report":
+            return obj.get("report")
+    if total is None or len(parts) != total:
+        return None
+    return json.loads(gzip.decompress(base64.b64decode("".join(parts[i] for i in range(total)))))
 
 
 # --------------------------------------------------------------------------- auth
