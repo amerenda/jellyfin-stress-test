@@ -20,6 +20,29 @@ Those tools tell you what the GPU can do. jfstress tells you what viewers will s
 path through Jellyfin's API, ffmpeg, the transcode directory, the k3s ingress and the network,
 plays different items from different positions, and judges by stalls and real-time fill speed.
 
+## k3s web UI
+
+`webui/app.py` is a small web page that runs each test as a Kubernetes Job. It is deployed at
+https://jellyfin-stress.amer.dev (LAN only, no login) by the dean-tofu root `k3s/apps/prod/jellyfin-stress`.
+
+- **Every CLI option is in the form.** The fields are read from `jfstress.build_parser()`, so a new
+  flag shows up in the UI without UI changes. The page shows the equivalent command line and
+  validates it with the CLI's own parser before it starts anything. Preset buttons fill in the
+  scenarios listed below.
+- **Each run is one pod.** It runs `jfstress.py --jsonl`, logs in as the form's user with the password
+  from Secret `jellyfin-stress-jellyfin` (BWS `prod-jellyfin-public-admin-password`), and prints JSON
+  lines: events, a status line every 5 s, and the final report. The UI reads them from the pod log.
+- **Placement.** Run pods use the nodeSelector and tolerations set in tofu (archlinux by default);
+  the form can override both for one run. *max run s* sets the Job's `activeDeadlineSeconds`.
+- **Stop** asks the run to end gracefully: the UI sets the pod annotation `jfstress.amer.dev/stop`,
+  the runner sees it through a downward API file within about a minute, stops and writes its report.
+  **Kill/Delete** deletes the Job and its log. Only one run at a time unless you tick *allow concurrent runs*.
+- **History** is the list of Jobs. Finished Jobs are kept for 7 days (`ttlSecondsAfterFinished`);
+  the result summary is cached on the Job, and the full report and log can be downloaded.
+
+The image (`Dockerfile`) holds both the UI and the runner. It is built from a commit of this repo by
+`dean-amer-dev/k3s-images` (`images/jellyfin-stress-test/source-ref`) and pushed to Artifact Registry.
+
 ## Web UI (Locust) + Grafana
 
 `locustfile.py` runs the same player model under [Locust](https://locust.io), which gives you a web
@@ -29,7 +52,7 @@ page to start tests from, and exports Prometheus metrics for the Grafana dashboa
 ```sh
 uv run --with locust==2.47.0 --with prometheus_client \
   locust -f locustfile.py --class-picker --host https://jellyfin-public-test.amer.dev
-# or: docker build -t jfstress . && docker run -p 8089:8089 -p 9646:9646 jfstress --host https://...
+# or: docker build -f Dockerfile.locust -t jfstress-locust . && docker run -p 8089:8089 -p 9646:9646 jfstress-locust --host https://...
 ```
 
 Open http://localhost:8089:
@@ -79,6 +102,12 @@ Use a test instance or a quiet time. A ramp run deliberately pushes the server u
 
 Combine them: `--mix transcode=3,direct=1`. In fixed mode the pattern is repeated until there are
 `--streams` streams. In ramp mode it sets the order in which streams are added.
+
+### Running in a pod
+
+`--jsonl` replaces the terminal table with JSON lines on stdout (`event`, `status` every
+`--status-interval` s, and a final `report`). `--stop-file PATH` ends the run gracefully once the file
+contains `true`, `1`, `yes` or `stop`. The k3s web UI uses both.
 
 ### Two ways to run
 
